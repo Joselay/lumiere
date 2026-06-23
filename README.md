@@ -13,6 +13,8 @@ cp .env.example .env
 uv run lumiere-bot
 ```
 
+Logs are pretty, timestamped, and colorized in a terminal. Set `LOG_LEVEL=DEBUG` in `.env` for more detail.
+
 ## Symbols
 
 Current supported OKX demo symbols:

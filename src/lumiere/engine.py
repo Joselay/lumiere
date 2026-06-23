@@ -116,13 +116,16 @@ class TradingEngine:
 
     async def pause(self) -> None:
         self._paused = True
+        log.warning("trading_paused")
         await self.notifier.send("Trading paused")
 
     async def resume(self) -> None:
         if self._panic_stopped:
+            log.warning("trading_resume_rejected", reason="panic_stop_active")
             await self.notifier.send("Cannot resume after panic stop; restart the bot")
             return
         self._paused = False
+        log.info("trading_resumed")
         await self.notifier.send("Trading resumed")
 
     async def panic(self) -> None:
@@ -130,6 +133,7 @@ class TradingEngine:
         self._panic_stopped = True
         self._stop_event.set()
         cancelled = await self.client.cancel_open_orders()
+        log.critical("panic_stop", cancelled_orders=len(cancelled))
         await self.notifier.send(f"PANIC stop active. Cancelled open orders: {len(cancelled)}")
 
     async def stop(self) -> None:
@@ -137,6 +141,12 @@ class TradingEngine:
 
     async def run_forever(self) -> None:
         self._running = True
+        log.info(
+            "engine_started",
+            strategies=len(self.strategies),
+            poll_interval_seconds=self.config.poll_interval_seconds,
+            td_mode=self.config.td_mode,
+        )
         await self.notifier.send("Trading engine started")
         try:
             while not self._stop_event.is_set() and not self._panic_stopped:
@@ -148,6 +158,7 @@ class TradingEngine:
                     )
         finally:
             self._running = False
+            log.info("engine_stopped")
             await self.notifier.send("Trading engine stopped")
 
     async def tick(self) -> None:
@@ -163,17 +174,27 @@ class TradingEngine:
                 self._last_decision = f"{decision.inst_id}:{decision.action.value}"
                 risk_decision = self.risk_manager.assess(decision, account)
                 self._last_risk_reason = risk_decision.reason
-                log.info(
+                decision_log = log.debug if decision.action is DecisionAction.HOLD else log.info
+                decision_log(
                     "strategy_decision",
                     inst_id=decision.inst_id,
                     action=decision.action.value,
                     reason=decision.reason,
-                    inputs=decision.inputs,
+                    fast_ma=decision.inputs.get("fast_ma"),
+                    slow_ma=decision.inputs.get("slow_ma"),
+                    position_base=decision.inputs.get("position_base"),
                     risk_allowed=risk_decision.allowed,
                     risk_reason=risk_decision.reason,
                 )
 
                 if not risk_decision.allowed:
+                    log.warning(
+                        "risk_blocked",
+                        inst_id=decision.inst_id,
+                        action=decision.action.value,
+                        reason=decision.reason,
+                        risk_reason=risk_decision.reason,
+                    )
                     await self.notifier.send(
                         f"Risk blocked {decision.inst_id} {decision.action.value}: "
                         f"{risk_decision.reason} ({decision.reason})"
@@ -192,6 +213,14 @@ class TradingEngine:
                 result = await self.client.place_market_order(order)
                 self.risk_manager.record_trade(inst_id=decision.inst_id)
                 self.risk_manager.record_success()
+                log.info(
+                    "order_submitted",
+                    inst_id=result.inst_id,
+                    side=result.side.value,
+                    size_btc=str(result.size_btc),
+                    order_id=result.order_id,
+                    reason=decision.reason,
+                )
                 await self.notifier.send(
                     f"Order submitted: {result.side.value} {result.size_btc} {result.inst_id} "
                     f"order_id={result.order_id} reason={decision.reason}"

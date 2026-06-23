@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(min_length=1)
     telegram_allowed_chat_ids: str = ""
 
+    log_level: str = "INFO"
+
     engine_poll_interval_seconds: float = 30.0
     engine_candle_bar: str = "1m"
     engine_candle_limit: int = 80
