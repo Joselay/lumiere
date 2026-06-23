@@ -93,16 +93,20 @@ class OKXDemoClient:
     async def place_market_order(self, request: OrderRequest) -> OrderResult:
         self.risk_manager.validate_order(request)
         client_order_id = f"lum{uuid4().hex[:24]}"
-        response = await asyncio.to_thread(
-            self._trade.place_order,
-            instId=request.inst_id,
-            tdMode=request.td_mode,
-            side=request.side.value,
-            ordType=request.order_type,
-            sz=str(request.size_btc),
-            clOrdId=client_order_id,
-            tag=self.settings.okx_order_tag,
-        )
+        order_kwargs = {
+            "instId": request.inst_id,
+            "tdMode": request.td_mode,
+            "side": request.side.value,
+            "ordType": request.order_type,
+            "sz": str(request.size_btc),
+            "clOrdId": client_order_id,
+            "tag": self.settings.okx_order_tag,
+        }
+        if request.side.value == "buy" and request.order_type == "market":
+            # OKX interprets spot market-buy sz as quote currency by default. Lumiere's
+            # strategy/risk sizes are base units, so make that explicit for buys.
+            order_kwargs["tgtCcy"] = "base_ccy"
+        response = await asyncio.to_thread(self._trade.place_order, **order_kwargs)
         data = _require_ok_response(response)
         if not data:
             raise OKXAPIError(f"OKX returned no order data: {response!r}")

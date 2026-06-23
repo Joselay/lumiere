@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from lumiere.okx_client import _parse_account_balances, _parse_btc_position
+import pytest
+
+from lumiere.config import Settings
+from lumiere.models import DecisionAction, OrderRequest
+from lumiere.okx_client import OKXDemoClient, _parse_account_balances, _parse_btc_position
+from lumiere.risk import RiskConfig, RiskManager
 
 
 def test_parse_account_balances_includes_spot_btc_and_eth_as_positions() -> None:
@@ -38,3 +43,55 @@ def test_parse_derivatives_position_uses_okx_positions_payload() -> None:
     assert position.size_btc == Decimal("2")
     assert position.avg_px == Decimal("100000")
     assert position.unrealized_pnl_usdt == Decimal("12.5")
+
+
+class FakeTradeAPI:
+    def __init__(self) -> None:
+        self.kwargs: dict[str, str] | None = None
+
+    def place_order(self, **kwargs):
+        self.kwargs = kwargs
+        return {"code": "0", "data": [{"ordId": "ord-1", "sCode": "0", "sMsg": "OK"}]}
+
+
+def make_demo_client(fake_trade: FakeTradeAPI) -> OKXDemoClient:
+    settings = Settings(
+        _env_file=None,
+        okx_api_key="key",
+        okx_api_secret="secret",
+        okx_passphrase="passphrase",
+        telegram_bot_token="token",
+    )
+    client = OKXDemoClient.__new__(OKXDemoClient)
+    client.settings = settings
+    client.risk_manager = RiskManager(RiskConfig(cooldown_seconds=0))
+    client._trade = fake_trade
+    return client
+
+
+@pytest.mark.asyncio
+async def test_place_market_buy_order_requests_base_currency_size() -> None:
+    fake_trade = FakeTradeAPI()
+    client = make_demo_client(fake_trade)
+
+    await client.place_market_order(
+        OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("0.001"))
+    )
+
+    assert fake_trade.kwargs is not None
+    assert fake_trade.kwargs["sz"] == "0.001"
+    assert fake_trade.kwargs["tgtCcy"] == "base_ccy"
+
+
+@pytest.mark.asyncio
+async def test_place_market_sell_order_leaves_default_size_currency() -> None:
+    fake_trade = FakeTradeAPI()
+    client = make_demo_client(fake_trade)
+
+    await client.place_market_order(
+        OrderRequest("BTC-USDT", DecisionAction.SELL, Decimal("0.001"))
+    )
+
+    assert fake_trade.kwargs is not None
+    assert fake_trade.kwargs["sz"] == "0.001"
+    assert "tgtCcy" not in fake_trade.kwargs
