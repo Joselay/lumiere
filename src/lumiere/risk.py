@@ -19,6 +19,10 @@ class RiskConfig:
     max_consecutive_failures: int = 3
     max_position_by_inst_id: Mapping[str, Decimal] | None = None
     min_order_by_inst_id: Mapping[str, Decimal] | None = None
+    max_drawdown_usdt: Decimal | None = None
+    max_daily_trades: int | None = None
+    max_spread_bps: Decimal | None = None
+    performance_gate_required: bool = False
 
     def __post_init__(self) -> None:
         if self.demo_flag != "1":
@@ -37,6 +41,12 @@ class RiskConfig:
             raise ValueError("cooldown_seconds cannot be negative")
         if self.max_consecutive_failures <= 0:
             raise ValueError("max_consecutive_failures must be positive")
+        if self.max_drawdown_usdt is not None and self.max_drawdown_usdt <= 0:
+            raise ValueError("max_drawdown_usdt must be positive when configured")
+        if self.max_daily_trades is not None and self.max_daily_trades <= 0:
+            raise ValueError("max_daily_trades must be positive when configured")
+        if self.max_spread_bps is not None and self.max_spread_bps <= 0:
+            raise ValueError("max_spread_bps must be positive when configured")
         for inst_id, value in (self.max_position_by_inst_id or {}).items():
             if inst_id not in self.allowed_inst_ids:
                 raise ValueError(f"max position configured for disallowed instrument: {inst_id}")
@@ -105,6 +115,23 @@ class RiskManager:
             return RiskDecision(False, "max_daily_loss_reached")
         if decision.action is DecisionAction.HOLD:
             return RiskDecision(True, "hold_allowed")
+        if self.config.performance_gate_required and not account.performance_gate_passed:
+            return RiskDecision(False, "performance_gate_not_passed")
+        if (
+            self.config.max_drawdown_usdt is not None
+            and account.max_drawdown_usdt >= self.config.max_drawdown_usdt
+        ):
+            return RiskDecision(False, "max_drawdown_reached")
+        if (
+            self.config.max_daily_trades is not None
+            and account.daily_trade_count >= self.config.max_daily_trades
+        ):
+            return RiskDecision(False, "daily_trade_limit_reached")
+        if self.config.max_spread_bps is not None:
+            if account.spread_bps is None:
+                return RiskDecision(False, "spread_unavailable")
+            if account.spread_bps > self.config.max_spread_bps:
+                return RiskDecision(False, "spread_too_wide")
         if decision.size_btc < self.config.min_order_for(decision.inst_id):
             return RiskDecision(False, "order_size_below_minimum")
         last_trade_at = self._last_trade_at_by_inst_id.get(

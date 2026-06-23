@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 lumiere-bot = "lumiere.main:run"
+lumiere-backtest = "lumiere.backtest_cli:main"
 
 [dependency-groups]
 dev = [

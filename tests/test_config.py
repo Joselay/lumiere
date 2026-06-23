@@ -41,3 +41,18 @@ def test_settings_uses_eth_specific_trade_and_risk_sizes() -> None:
 def test_settings_rejects_unsupported_symbols() -> None:
     with pytest.raises(ValueError, match="supported symbols"):
         make_settings(okx_inst_ids="BTC-USDT,SOL-USDT")
+
+
+def test_settings_maps_optional_profitability_risk_controls() -> None:
+    settings = make_settings(
+        risk_max_drawdown_usdt=Decimal("50"),
+        risk_max_daily_trades=10,
+        risk_max_spread_bps=Decimal("8"),
+        risk_require_performance_gate=True,
+    )
+    risk = settings.risk_config()
+
+    assert risk.max_drawdown_usdt == Decimal("50")
+    assert risk.max_daily_trades == 10
+    assert risk.max_spread_bps == Decimal("8")
+    assert risk.performance_gate_required is True

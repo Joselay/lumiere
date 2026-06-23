@@ -19,8 +19,9 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 | Symbols | `BTC-USDT`, `ETH-USDT` |
 | Strategy | Moving-average crossover strategy implementation |
 | Orders | OKX market buy/sell orders through `python-okx` |
-| Telegram | `/start`, `/status`, `/strategy`, `/pause`, `/resume`, `/panic` |
-| Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, max daily loss, max consecutive failures |
+| Telegram | `/start`, `/status`, `/strategy`, `/performance`, `/risk`, `/pause`, `/resume`, `/panic` |
+| Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, performance gate, max consecutive failures |
+| Profitability evidence | OKX SDK historical candle backtests with fees, spread, slippage, rejected-order modeling, PnL ledger metrics, and buy-and-hold/no-trade baselines |
 | Observability | Pretty structured logs with configurable `LOG_LEVEL` |
 
 ## Bot showcase
@@ -32,6 +33,12 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 - Cancels open orders during panic stop.
 - Keeps strategy and risk logic covered by tests so future changes are easier to make safely.
 
+## Profitability and safety disclaimer
+
+Lumiere can help collect evidence and enforce safeguards, but **profit is never guaranteed**. Backtests are not live trading: fees, spread, slippage, liquidity, rejected orders, and regime changes can make live/demo results worse than historical reports.
+
+Current default assumptions for reports are conservative but configurable: 10 bps taker fee, 2 bps spread, 5 bps slippage, 0 bps market impact, and no synthetic rejected orders unless requested.
+
 ## Setup
 
 ```bash
@@ -42,6 +49,16 @@ uv run lumiere-bot
 ```
 
 Logs are pretty, timestamped, and colorized in a terminal. Set `LOG_LEVEL=DEBUG` in `.env` for more detail.
+
+## Backtesting
+
+Run a reproducible BTC/ETH report using OKX historical candle access through `python-okx`:
+
+```bash
+uv run lumiere-backtest --inst-id BTC-USDT --inst-id ETH-USDT --bar 1m --limit 300
+```
+
+The JSON report includes net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, win rate, profit factor, Sharpe/Sortino when available, rejected order count, and buy-and-hold/no-trade baselines.
 
 ## Symbols
 
@@ -57,11 +74,13 @@ OKX_INST_IDS=BTC-USDT,ETH-USDT
 
 ```text
 /start     show that the bot is online
-/status    show engine, account, position, and risk status
-/strategy  show active strategy configuration
-/pause     pause trading
-/resume    resume trading
-/panic     stop the engine and cancel open orders
+/status       show engine, account, position, and risk status
+/strategy     show active strategy configuration
+/performance  show daily realized PnL, drawdown, trade count, spread, and gate state
+/risk         show configured risk limits and current open risk inputs
+/pause        pause trading
+/resume       resume trading
+/panic        stop the engine and cancel open orders
 ```
 
 ## Development

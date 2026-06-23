@@ -71,6 +71,14 @@ def command_router(
 
         await guard(message, show)
 
+    @router.message(Command("performance"))
+    async def performance(message: Message) -> None:
+        await guard(message, engine.performance_text)
+
+    @router.message(Command("risk"))
+    async def risk(message: Message) -> None:
+        await guard(message, engine.risk_text)
+
     @router.message(Command("pause"))
     async def pause(message: Message) -> None:
         async def do_pause() -> str:

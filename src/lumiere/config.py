@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     risk_max_daily_loss_usdt: Decimal = Decimal("25")
     risk_cooldown_seconds: int = 300
     risk_max_consecutive_failures: int = 3
+    risk_max_drawdown_usdt: Decimal = Decimal("0")
+    risk_max_daily_trades: int = 0
+    risk_max_spread_bps: Decimal = Decimal("0")
+    risk_require_performance_gate: bool = False
 
     @field_validator("okx_flag")
     @classmethod
@@ -126,6 +130,10 @@ class Settings(BaseSettings):
             min_order_by_inst_id={
                 inst_id: self._min_order_for(inst_id) for inst_id in self.enabled_inst_ids
             },
+            max_drawdown_usdt=_positive_decimal_or_none(self.risk_max_drawdown_usdt),
+            max_daily_trades=self.risk_max_daily_trades if self.risk_max_daily_trades > 0 else None,
+            max_spread_bps=_positive_decimal_or_none(self.risk_max_spread_bps),
+            performance_gate_required=self.risk_require_performance_gate,
         )
 
     def _trade_size_for(self, inst_id: str) -> Decimal:
@@ -147,6 +155,10 @@ class Settings(BaseSettings):
         if inst_id.startswith("ETH-"):
             return self.risk_min_order_eth
         return self.risk_min_order_btc
+
+
+def _positive_decimal_or_none(value: Decimal) -> Decimal | None:
+    return value if value > 0 else None
 
 
 def _parse_inst_ids(raw: str) -> tuple[str, ...]:

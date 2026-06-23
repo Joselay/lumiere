@@ -107,3 +107,71 @@ def test_validate_order_accepts_demo_btc_and_eth_orders() -> None:
 
     risk.validate_order(OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("0.001")))
     risk.validate_order(OrderRequest("ETH-USDT", DecisionAction.BUY, Decimal("0.01")))
+
+
+def test_risk_blocks_real_daily_loss_from_account_snapshot() -> None:
+    risk = RiskManager(RiskConfig(max_daily_loss_usdt=Decimal("25")))
+
+    decision = risk.assess(buy(), account(pnl="-25"))
+
+    assert not decision.allowed
+    assert decision.reason == "max_daily_loss_reached"
+
+
+def test_risk_blocks_drawdown_daily_trade_limit_and_spread_guard() -> None:
+    assert (
+        RiskManager(RiskConfig(max_drawdown_usdt=Decimal("10")))
+        .assess(
+            buy(),
+            AccountSnapshot(
+                equity_usdt=Decimal("1000"),
+                available_usdt=Decimal("1000"),
+                max_drawdown_usdt=Decimal("10"),
+            ),
+        )
+        .reason
+        == "max_drawdown_reached"
+    )
+    assert (
+        RiskManager(RiskConfig(max_daily_trades=2))
+        .assess(
+            buy(),
+            AccountSnapshot(
+                equity_usdt=Decimal("1000"),
+                available_usdt=Decimal("1000"),
+                daily_trade_count=2,
+            ),
+        )
+        .reason
+        == "daily_trade_limit_reached"
+    )
+    assert (
+        RiskManager(RiskConfig(max_spread_bps=Decimal("5")))
+        .assess(
+            buy(),
+            AccountSnapshot(
+                equity_usdt=Decimal("1000"),
+                available_usdt=Decimal("1000"),
+                spread_bps=Decimal("6"),
+            ),
+        )
+        .reason
+        == "spread_too_wide"
+    )
+
+
+def test_risk_requires_performance_gate_when_configured() -> None:
+    risk = RiskManager(RiskConfig(performance_gate_required=True))
+
+    blocked = risk.assess(buy(), account())
+    allowed = risk.assess(
+        buy(),
+        AccountSnapshot(
+            equity_usdt=Decimal("1000"),
+            available_usdt=Decimal("1000"),
+            performance_gate_passed=True,
+        ),
+    )
+
+    assert blocked.reason == "performance_gate_not_passed"
+    assert allowed.allowed

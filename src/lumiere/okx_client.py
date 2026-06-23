@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from lumiere.config import Settings
+from lumiere.ledger import realized_pnl_for_period, trade_fill_from_okx_row
 from lumiere.models import (
     AccountSnapshot,
     MarketCandle,
@@ -83,12 +84,77 @@ class OKXDemoClient:
         positions = tuple(
             positions_by_inst_id[inst_id] for inst_id in inst_ids if inst_id in positions_by_inst_id
         )
+        daily_realized_pnl, daily_trade_count = await self.fetch_daily_realized_pnl()
+        spread_bps = None
+        if self.risk_manager.config.max_spread_bps is not None:
+            spread_bps = await self.fetch_max_spread_bps()
         return AccountSnapshot(
             equity_usdt=equity,
             available_usdt=available,
             positions=positions,
-            daily_realized_pnl_usdt=Decimal("0"),
+            daily_realized_pnl_usdt=daily_realized_pnl,
+            daily_trade_count=daily_trade_count,
+            spread_bps=spread_bps,
         )
+
+    async def fetch_daily_realized_pnl(
+        self,
+        now: datetime | None = None,
+    ) -> tuple[Decimal, int]:
+        """Derive today's realized PnL from OKX fills/fill history instead of placeholders."""
+
+        now = now or datetime.now(tz=UTC)
+        period_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
+        rows = await self._fetch_fill_rows(period_start=period_start, period_end=now)
+        return (
+            _daily_realized_pnl_from_fill_rows(rows, period_start),
+            _daily_trade_count(rows, period_start),
+        )
+
+    async def fetch_max_spread_bps(self) -> Decimal:
+        spreads: list[Decimal] = []
+        for inst_id in self.settings.enabled_inst_ids:
+            response = await asyncio.to_thread(
+                self._market.get_orderbook,
+                instId=inst_id,
+                sz="1",
+            )
+            spreads.append(_spread_bps_from_orderbook(_require_ok_response(response)))
+        return max(spreads, default=Decimal("0"))
+
+    async def _fetch_fill_rows(
+        self,
+        *,
+        period_start: datetime,
+        period_end: datetime,
+    ) -> list[dict[str, Any]]:
+        begin = _to_okx_millis(period_start)
+        end = _to_okx_millis(period_end)
+        responses: list[dict[str, Any]] = []
+        for inst_id in self.settings.enabled_inst_ids:
+            responses.append(
+                await asyncio.to_thread(
+                    self._trade.get_fills,
+                    instType="SPOT",
+                    instId=inst_id,
+                    begin=begin,
+                    end=end,
+                    limit="100",
+                )
+            )
+            if hasattr(self._trade, "get_fills_history"):
+                responses.append(
+                    await asyncio.to_thread(
+                        self._trade.get_fills_history,
+                        "SPOT",
+                        instId=inst_id,
+                        limit="100",
+                    )
+                )
+        rows: list[dict[str, Any]] = []
+        for response in responses:
+            rows.extend(_require_ok_response(response))
+        return _dedupe_fill_rows(rows)
 
     async def place_market_order(self, request: OrderRequest) -> OrderResult:
         self.risk_manager.validate_order(request)
@@ -141,6 +207,75 @@ class OKXDemoClient:
                 )
                 cancelled.extend(_require_ok_response(cancel_response))
         return cancelled
+
+
+def _spread_bps_from_orderbook(data: list[Any]) -> Decimal:
+    if not data:
+        raise OKXAPIError("OKX returned no orderbook data")
+    orderbook = data[0]
+    bids = orderbook.get("bids") or []
+    asks = orderbook.get("asks") or []
+    if not bids or not asks:
+        raise OKXAPIError(f"OKX orderbook missing best bid/ask: {_safe_response_repr(orderbook)}")
+    best_bid = Decimal(str(bids[0][0]))
+    best_ask = Decimal(str(asks[0][0]))
+    midpoint = (best_bid + best_ask) / Decimal("2")
+    if midpoint <= 0:
+        raise OKXAPIError(f"OKX orderbook midpoint is invalid: {_safe_response_repr(orderbook)}")
+    return (best_ask - best_bid) / midpoint * Decimal("10000")
+
+
+def _daily_realized_pnl_from_fill_rows(
+    rows: list[dict[str, Any]],
+    period_start: datetime,
+) -> Decimal:
+    period_rows = [row for row in rows if _fill_ts(row) >= period_start]
+    exchange_pnl = Decimal("0")
+    exchange_fee_cost = Decimal("0")
+    has_exchange_pnl = False
+    for row in period_rows:
+        raw_pnl = row.get("fillPnl")
+        if raw_pnl not in {None, ""}:
+            pnl_value = Decimal(str(raw_pnl or "0"))
+            has_exchange_pnl = has_exchange_pnl or pnl_value != 0
+            exchange_pnl += pnl_value
+            exchange_fee_cost += trade_fill_from_okx_row(row).fee_cost_usdt()
+    if has_exchange_pnl:
+        return exchange_pnl - exchange_fee_cost
+
+    fills = [trade_fill_from_okx_row(row) for row in rows]
+    return realized_pnl_for_period(fills, period_start=period_start)
+
+
+def _daily_trade_count(rows: list[dict[str, Any]], period_start: datetime) -> int:
+    return sum(1 for row in rows if _fill_ts(row) >= period_start)
+
+
+def _dedupe_fill_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for row in rows:
+        key = (
+            str(row.get("tradeId") or row.get("execId") or ""),
+            str(row.get("ordId") or ""),
+            str(row.get("instId") or ""),
+            str(row.get("ts") or ""),
+            str(row.get("side") or ""),
+            str(row.get("fillSz") or row.get("sz") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _fill_ts(row: dict[str, Any]) -> datetime:
+    return datetime.fromtimestamp(int(str(row.get("ts") or "0")) / 1000, tz=UTC)
+
+
+def _to_okx_millis(value: datetime) -> str:
+    return str(int(value.timestamp() * 1000))
 
 
 def _require_ok_response(response: dict[str, Any]) -> list[Any]:

@@ -110,9 +110,44 @@ class TradingEngine:
         return (
             f"running={status.running} paused={status.paused} panic={status.panic_stopped} "
             f"equity_usdt={account.equity_usdt} available_usdt={account.available_usdt} "
-            f"positions={_positions_text(account)} failures={status.consecutive_failures} "
+            f"positions={_positions_text(account)} "
+            f"daily_pnl_usdt={account.daily_realized_pnl_usdt} "
+            f"drawdown_usdt={account.max_drawdown_usdt} "
+            f"daily_trades={account.daily_trade_count} "
+            f"gate_passed={account.performance_gate_passed} failures={status.consecutive_failures} "
             f"last_decision={status.last_decision} last_risk={status.last_risk_reason}"
         )
+
+    async def performance_text(self) -> str:
+        account = await self._account_for_report()
+        return (
+            f"daily_realized_pnl_usdt={account.daily_realized_pnl_usdt} "
+            f"max_drawdown_usdt={account.max_drawdown_usdt} "
+            f"daily_trade_count={account.daily_trade_count} "
+            f"spread_bps={account.spread_bps} "
+            f"performance_gate_passed={account.performance_gate_passed}"
+        )
+
+    async def risk_text(self) -> str:
+        account = await self._account_for_report()
+        config = self.risk_manager.config
+        gate_state = "passed" if account.performance_gate_passed else "blocked"
+        return (
+            f"allowed_symbols={','.join(config.allowed_inst_ids)} "
+            f"daily_pnl_usdt={account.daily_realized_pnl_usdt}/{-config.max_daily_loss_usdt} "
+            f"drawdown_usdt={account.max_drawdown_usdt}/{config.max_drawdown_usdt} "
+            f"daily_trades={account.daily_trade_count}/{config.max_daily_trades} "
+            f"spread_bps={account.spread_bps}/{config.max_spread_bps} "
+            f"performance_gate_required={config.performance_gate_required} "
+            f"performance_gate={gate_state} failures={self.risk_manager.consecutive_failures}"
+        )
+
+    async def _account_for_report(self) -> AccountSnapshot:
+        account = self._last_account
+        if account is None:
+            account = await self.client.fetch_account_snapshot()
+            self._last_account = account
+        return account
 
     async def pause(self) -> None:
         self._paused = True

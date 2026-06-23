@@ -42,6 +42,10 @@ class AccountSnapshot:
     btc_position: Position | None = None
     positions: tuple[Position, ...] = ()
     daily_realized_pnl_usdt: Decimal = Decimal("0")
+    daily_trade_count: int = 0
+    max_drawdown_usdt: Decimal = Decimal("0")
+    spread_bps: Decimal | None = None
+    performance_gate_passed: bool = False
 
     def __post_init__(self) -> None:
         positions = tuple(self.positions)
