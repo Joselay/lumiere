@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -127,11 +128,42 @@ class OKXDemoClient:
 def _require_ok_response(response: dict[str, Any]) -> list[Any]:
     code = str(response.get("code", ""))
     if code != "0":
-        raise OKXAPIError(f"OKX API error: {response!r}")
+        raise OKXAPIError(f"OKX API error: {_safe_response_repr(response)}")
     data = response.get("data", [])
     if not isinstance(data, list):
-        raise OKXAPIError(f"OKX response data is not a list: {response!r}")
+        raise OKXAPIError(f"OKX response data is not a list: {_safe_response_repr(response)}")
     return data
+
+
+_SENSITIVE_RESPONSE_KEYS = {
+    "apiKey",
+    "api_key",
+    "apiSecret",
+    "api_secret",
+    "api_secret_key",
+    "passphrase",
+}
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _safe_response_repr(value: Any) -> str:
+    return repr(_redact_sensitive(value))
+
+
+def _redact_sensitive(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if key in _SENSITIVE_RESPONSE_KEYS else _redact_sensitive(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return _IPV4_RE.sub("<redacted-ip>", _UUID_RE.sub("<redacted-id>", value))
+    return value
 
 
 def _parse_candle(row: list[str]) -> MarketCandle:
