@@ -62,3 +62,42 @@ def test_strategy_holds_without_enough_candles() -> None:
 
     assert decision.action is DecisionAction.HOLD
     assert decision.reason == "not_enough_candles"
+
+
+def test_strategy_ignores_dust_position_for_sell_signal() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(
+            fast_window=2,
+            slow_window=3,
+            dust_threshold_btc=Decimal("0.00001"),
+        )
+    )
+    account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position(inst_id="BTC-USDT", size_btc=Decimal("0.00000000268")),
+    )
+
+    decision = strategy.decide(candles(["110", "101", "100"]), account)
+
+    assert decision.action is DecisionAction.HOLD
+    assert decision.reason == "no_position_change"
+
+
+def test_strategy_treats_dust_position_as_flat_for_buy_signal() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(
+            fast_window=2,
+            slow_window=3,
+            dust_threshold_btc=Decimal("0.00001"),
+        )
+    )
+    account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position(inst_id="BTC-USDT", size_btc=Decimal("0.00000000268")),
+    )
+
+    decision = strategy.decide(candles(["100", "101", "110"]), account)
+
+    assert decision.action is DecisionAction.BUY

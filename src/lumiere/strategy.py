@@ -12,6 +12,7 @@ class MovingAverageCrossoverConfig:
     fast_window: int = 5
     slow_window: int = 20
     trade_size_btc: Decimal = Decimal("0.001")
+    dust_threshold_btc: Decimal = Decimal("0.00001")
 
     def __post_init__(self) -> None:
         if self.fast_window <= 0:
@@ -20,6 +21,8 @@ class MovingAverageCrossoverConfig:
             raise ValueError("slow_window must be greater than fast_window")
         if self.trade_size_btc <= 0:
             raise ValueError("trade_size_btc must be positive")
+        if self.dust_threshold_btc < 0:
+            raise ValueError("dust_threshold_btc cannot be negative")
 
 
 class MovingAverageCrossoverStrategy:
@@ -42,6 +45,7 @@ class MovingAverageCrossoverStrategy:
             "fast_window": self.config.fast_window,
             "slow_window": self.config.slow_window,
             "trade_size_btc": str(self.config.trade_size_btc),
+            "dust_threshold_btc": str(self.config.dust_threshold_btc),
         }
 
     def decide(
@@ -59,11 +63,17 @@ class MovingAverageCrossoverStrategy:
         closes = [c.close for c in candles]
         fast_ma = simple_average(closes[-self.config.fast_window :])
         slow_ma = simple_average(closes[-self.config.slow_window :])
-        position = account.btc_position_size
+        raw_position = account.btc_position_size
+        position = (
+            Decimal("0")
+            if abs(raw_position) < self.config.dust_threshold_btc
+            else raw_position
+        )
         inputs = {
             "fast_ma": str(fast_ma),
             "slow_ma": str(slow_ma),
-            "position_btc": str(position),
+            "position_btc": str(raw_position),
+            "effective_position_btc": str(position),
             "fast_window": self.config.fast_window,
             "slow_window": self.config.slow_window,
         }

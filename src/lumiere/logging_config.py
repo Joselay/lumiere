@@ -13,7 +13,7 @@ def configure_logging(level: int = logging.INFO) -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.TimeStamper(fmt="iso", utc=True),
             structlog.processors.add_log_level,
-            structlog.processors.StackInfoRenderer,
+            structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.JSONRenderer(),
         ],

@@ -12,6 +12,7 @@ class RiskConfig:
     demo_flag: str = "1"
     allowed_inst_ids: tuple[str, ...] = ("BTC-USDT",)
     max_position_btc: Decimal = Decimal("0.005")
+    min_order_btc: Decimal = Decimal("0.00001")
     max_daily_loss_usdt: Decimal = Decimal("25")
     cooldown_seconds: int = 300
     max_consecutive_failures: int = 3
@@ -25,6 +26,8 @@ class RiskConfig:
             raise ValueError("BTC-only guard failed: all allowed instruments must start with BTC-")
         if self.max_position_btc <= 0:
             raise ValueError("max_position_btc must be positive")
+        if self.min_order_btc <= 0:
+            raise ValueError("min_order_btc must be positive")
         if self.max_daily_loss_usdt <= 0:
             raise ValueError("max_daily_loss_usdt must be positive")
         if self.cooldown_seconds < 0:
@@ -81,6 +84,8 @@ class RiskManager:
             return RiskDecision(False, "max_daily_loss_reached")
         if decision.action is DecisionAction.HOLD:
             return RiskDecision(True, "hold_allowed")
+        if decision.size_btc < self.config.min_order_btc:
+            return RiskDecision(False, "order_size_below_minimum")
         if self._last_trade_at is not None:
             cooldown_until = self._last_trade_at + timedelta(seconds=self.config.cooldown_seconds)
             if now < cooldown_until:
@@ -104,3 +109,5 @@ class RiskManager:
             raise ValueError(f"invalid order side: {order.side}")
         if order.size_btc <= 0:
             raise ValueError("order size must be positive")
+        if order.size_btc < self.config.min_order_btc:
+            raise ValueError("order size below minimum")

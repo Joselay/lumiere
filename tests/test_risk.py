@@ -75,6 +75,15 @@ def test_risk_stops_after_repeated_failures() -> None:
     assert decision.reason == "max_consecutive_failures_reached"
 
 
+def test_risk_blocks_order_below_minimum_size() -> None:
+    risk = RiskManager(RiskConfig(min_order_btc=Decimal("0.00001")))
+
+    decision = risk.assess(buy(size="0.00000000268"), account())
+
+    assert not decision.allowed
+    assert decision.reason == "order_size_below_minimum"
+
+
 def test_validate_order_accepts_demo_btc_order() -> None:
     risk = RiskManager(RiskConfig())
 
