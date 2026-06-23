@@ -66,7 +66,7 @@ class CollectingNotifier:
 
 
 @pytest.mark.asyncio
-async def test_engine_tick_places_order_from_deterministic_signal() -> None:
+async def test_engine_tick_places_order_from_strategy_signal() -> None:
     client = FakeClient(candles(["100", "101", "110"]))
     notifier = CollectingNotifier()
     engine = TradingEngine(

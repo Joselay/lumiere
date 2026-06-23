@@ -26,13 +26,7 @@ class MovingAverageCrossoverConfig:
 
 
 class MovingAverageCrossoverStrategy:
-    """Deterministic long-only spot strategy for one OKX instrument.
-
-    The strategy buys when the fast simple moving average is above the slow SMA and
-    no base asset is held. It sells the configured size, capped by the current
-    position, when the fast SMA is below the slow SMA and base asset is held.
-    Equal averages hold.
-    """
+    """Moving-average crossover strategy implementation."""
 
     name = "moving_average_crossover"
 

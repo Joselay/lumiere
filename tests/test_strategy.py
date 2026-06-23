@@ -21,7 +21,7 @@ def candles(closes: list[str]) -> list[MarketCandle]:
     ]
 
 
-def test_strategy_is_deterministic_for_same_inputs() -> None:
+def test_strategy_returns_same_decision_for_same_inputs() -> None:
     strategy = MovingAverageCrossoverStrategy(
         MovingAverageCrossoverConfig(fast_window=2, slow_window=3, trade_size_btc=Decimal("0.01"))
     )
