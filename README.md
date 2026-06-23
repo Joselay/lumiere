@@ -1,6 +1,6 @@
 # Lumiere
 
-Lumiere is a Python trading automation workspace.
+Lumiere is a Python trading automation workspace for OKX demo BTC-USDT and ETH-USDT trading.
 
 The bot's trading behavior is intentionally kept in source code and tests so it can be changed as the project evolves. This README avoids defining a fixed strategy, market, or final architecture.
 
@@ -12,6 +12,17 @@ cp .env.example .env
 # edit .env with your local credentials/settings
 uv run lumiere-bot
 ```
+
+## Symbols
+
+Current supported OKX demo symbols:
+
+```text
+BTC-USDT
+ETH-USDT
+```
+
+Enable symbols with `OKX_INST_IDS=BTC-USDT,ETH-USDT`. `OKX_INST_ID` remains as a single-symbol fallback.
 
 ## Telegram controls
 

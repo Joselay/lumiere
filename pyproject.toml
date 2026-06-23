@@ -1,7 +1,7 @@
 [project]
 name = "lumiere"
 version = "0.1.0"
-description = "Deterministic Telegram bot for automated BTC trading on OKX demo"
+description = "Deterministic Telegram bot for automated BTC and ETH trading on OKX demo"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [

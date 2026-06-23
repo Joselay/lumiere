@@ -35,10 +35,18 @@ def test_risk_config_refuses_live_okx_flag() -> None:
         RiskConfig(demo_flag="0")
 
 
-def test_risk_blocks_non_btc_instrument() -> None:
-    risk = RiskManager(RiskConfig())
+def test_risk_allows_configured_eth_instrument() -> None:
+    risk = RiskManager(RiskConfig(allowed_inst_ids=("BTC-USDT", "ETH-USDT")))
 
     decision = risk.assess(buy(inst_id="ETH-USDT"), account())
+
+    assert decision.allowed
+
+
+def test_risk_blocks_unconfigured_instrument() -> None:
+    risk = RiskManager(RiskConfig(allowed_inst_ids=("BTC-USDT", "ETH-USDT")))
+
+    decision = risk.assess(buy(inst_id="SOL-USDT"), account())
 
     assert not decision.allowed
     assert decision.reason == "instrument_not_allowed"
@@ -56,12 +64,22 @@ def test_risk_blocks_max_position_size() -> None:
 def test_risk_blocks_cooldown_between_trades() -> None:
     risk = RiskManager(RiskConfig(cooldown_seconds=60))
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    risk.record_trade(now)
+    risk.record_trade(now, inst_id="BTC-USDT")
 
     decision = risk.assess(buy(), account(), now=now + timedelta(seconds=10))
 
     assert not decision.allowed
     assert decision.reason == "cooldown_active"
+
+
+def test_risk_cooldown_is_per_instrument() -> None:
+    risk = RiskManager(RiskConfig(allowed_inst_ids=("BTC-USDT", "ETH-USDT"), cooldown_seconds=60))
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    risk.record_trade(now, inst_id="BTC-USDT")
+
+    decision = risk.assess(buy(inst_id="ETH-USDT"), account(), now=now + timedelta(seconds=10))
+
+    assert decision.allowed
 
 
 def test_risk_stops_after_repeated_failures() -> None:
@@ -84,7 +102,8 @@ def test_risk_blocks_order_below_minimum_size() -> None:
     assert decision.reason == "order_size_below_minimum"
 
 
-def test_validate_order_accepts_demo_btc_order() -> None:
-    risk = RiskManager(RiskConfig())
+def test_validate_order_accepts_demo_btc_and_eth_orders() -> None:
+    risk = RiskManager(RiskConfig(allowed_inst_ids=("BTC-USDT", "ETH-USDT")))
 
     risk.validate_order(OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("0.001")))
+    risk.validate_order(OrderRequest("ETH-USDT", DecisionAction.BUY, Decimal("0.01")))

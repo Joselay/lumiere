@@ -30,13 +30,43 @@ class Position:
     avg_px: Decimal = Decimal("0")
     unrealized_pnl_usdt: Decimal = Decimal("0")
 
+    @property
+    def size_base(self) -> Decimal:
+        return self.size_btc
+
 
 @dataclass(frozen=True, slots=True)
 class AccountSnapshot:
     equity_usdt: Decimal
     available_usdt: Decimal
     btc_position: Position | None = None
+    positions: tuple[Position, ...] = ()
     daily_realized_pnl_usdt: Decimal = Decimal("0")
+
+    def __post_init__(self) -> None:
+        positions = tuple(self.positions)
+        if self.btc_position is not None and all(
+            position.inst_id != self.btc_position.inst_id for position in positions
+        ):
+            positions = (*positions, self.btc_position)
+        btc_position = self.btc_position or next(
+            (position for position in positions if position.inst_id.startswith("BTC-")),
+            None,
+        )
+        object.__setattr__(self, "positions", positions)
+        object.__setattr__(self, "btc_position", btc_position)
+
+    def position_for(self, inst_id: str) -> Position | None:
+        for position in self.positions:
+            if position.inst_id == inst_id:
+                return position
+        return None
+
+    def position_size(self, inst_id: str) -> Decimal:
+        position = self.position_for(inst_id)
+        if position is None:
+            return Decimal("0")
+        return position.size_btc
 
     @property
     def btc_position_size(self) -> Decimal:

@@ -55,7 +55,7 @@ def command_router(
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
-        await guard(message, lambda: _text("Lumiere OKX demo BTC bot is online"))
+        await guard(message, lambda: _text("Lumiere OKX demo BTC/ETH bot is online"))
 
     @router.message(Command("status"))
     async def status(message: Message) -> None:
@@ -64,8 +64,10 @@ def command_router(
     @router.message(Command("strategy"))
     async def strategy(message: Message) -> None:
         async def show() -> str:
-            params = engine.strategy.describe()
-            return "\n".join(f"{key}={value}" for key, value in params.items())
+            sections = []
+            for params in engine.describe_strategies():
+                sections.append("\n".join(f"{key}={value}" for key, value in params.items()))
+            return "\n\n".join(sections)
 
         await guard(message, show)
 

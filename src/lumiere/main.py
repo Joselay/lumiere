@@ -13,7 +13,9 @@ from lumiere.telegram_bot import run_bot
 
 def build_engine(settings: Settings) -> TradingEngine:
     risk_manager = RiskManager(settings.risk_config())
-    strategy = MovingAverageCrossoverStrategy(settings.strategy_config())
+    strategy = tuple(
+        MovingAverageCrossoverStrategy(config) for config in settings.strategy_configs()
+    )
     client = OKXDemoClient(settings, risk_manager)
     return TradingEngine(
         client=client,

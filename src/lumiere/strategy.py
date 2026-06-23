@@ -26,11 +26,12 @@ class MovingAverageCrossoverConfig:
 
 
 class MovingAverageCrossoverStrategy:
-    """Deterministic long-only BTC spot strategy.
+    """Deterministic long-only spot strategy for one OKX instrument.
 
     The strategy buys when the fast simple moving average is above the slow SMA and
-    no BTC is held. It sells the configured size, capped by the current position,
-    when the fast SMA is below the slow SMA and BTC is held. Equal averages hold.
+    no base asset is held. It sells the configured size, capped by the current
+    position, when the fast SMA is below the slow SMA and base asset is held.
+    Equal averages hold.
     """
 
     name = "moving_average_crossover"
@@ -63,17 +64,15 @@ class MovingAverageCrossoverStrategy:
         closes = [c.close for c in candles]
         fast_ma = simple_average(closes[-self.config.fast_window :])
         slow_ma = simple_average(closes[-self.config.slow_window :])
-        raw_position = account.btc_position_size
+        raw_position = account.position_size(self.config.inst_id)
         position = (
-            Decimal("0")
-            if abs(raw_position) < self.config.dust_threshold_btc
-            else raw_position
+            Decimal("0") if abs(raw_position) < self.config.dust_threshold_btc else raw_position
         )
         inputs = {
             "fast_ma": str(fast_ma),
             "slow_ma": str(slow_ma),
-            "position_btc": str(raw_position),
-            "effective_position_btc": str(position),
+            "position_base": str(raw_position),
+            "effective_position_base": str(position),
             "fast_window": self.config.fast_window,
             "slow_window": self.config.slow_window,
         }

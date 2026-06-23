@@ -26,13 +26,16 @@ def candles(closes: list[str]) -> list[MarketCandle]:
 
 
 class FakeClient:
-    def __init__(self, market: list[MarketCandle]) -> None:
+    def __init__(self, market: list[MarketCandle] | dict[str, list[MarketCandle]]) -> None:
         self.market = market
         self.account = AccountSnapshot(equity_usdt=Decimal("1000"), available_usdt=Decimal("1000"))
         self.orders: list[OrderRequest] = []
         self.cancelled = False
 
-    async def fetch_candles(self) -> list[MarketCandle]:
+    async def fetch_candles(self, inst_id: str | None = None) -> list[MarketCandle]:
+        if isinstance(self.market, dict):
+            assert inst_id is not None
+            return self.market[inst_id]
         return self.market
 
     async def fetch_account_snapshot(self) -> AccountSnapshot:
@@ -83,6 +86,51 @@ async def test_engine_tick_places_order_from_deterministic_signal() -> None:
     assert len(client.orders) == 1
     assert client.orders[0].side is DecisionAction.BUY
     assert "Order submitted: buy" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_engine_tick_runs_btc_and_eth_strategies() -> None:
+    client = FakeClient(
+        {
+            "BTC-USDT": candles(["100", "101", "110"]),
+            "ETH-USDT": candles(["100", "101", "110"]),
+        }
+    )
+    notifier = CollectingNotifier()
+    engine = TradingEngine(
+        client=client,
+        strategy=(
+            MovingAverageCrossoverStrategy(
+                MovingAverageCrossoverConfig(
+                    inst_id="BTC-USDT",
+                    fast_window=2,
+                    slow_window=3,
+                    trade_size_btc=Decimal("0.001"),
+                )
+            ),
+            MovingAverageCrossoverStrategy(
+                MovingAverageCrossoverConfig(
+                    inst_id="ETH-USDT", fast_window=2, slow_window=3, trade_size_btc=Decimal("0.01")
+                )
+            ),
+        ),
+        risk_manager=RiskManager(
+            RiskConfig(
+                allowed_inst_ids=("BTC-USDT", "ETH-USDT"),
+                cooldown_seconds=0,
+                max_position_by_inst_id={
+                    "BTC-USDT": Decimal("0.005"),
+                    "ETH-USDT": Decimal("0.05"),
+                },
+            )
+        ),
+        notifier=notifier,
+        config=EngineConfig(td_mode="cash"),
+    )
+
+    await engine.tick()
+
+    assert [order.inst_id for order in client.orders] == ["BTC-USDT", "ETH-USDT"]
 
 
 @pytest.mark.asyncio

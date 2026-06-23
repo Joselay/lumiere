@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Protocol
@@ -15,7 +16,7 @@ log = structlog.get_logger(__name__)
 
 
 class TradingClient(Protocol):
-    async def fetch_candles(self): ...
+    async def fetch_candles(self, inst_id: str | None = None): ...
 
     async def fetch_account_snapshot(self) -> AccountSnapshot: ...
 
@@ -54,13 +55,14 @@ class TradingEngine:
     def __init__(
         self,
         client: TradingClient,
-        strategy: MovingAverageCrossoverStrategy,
+        strategy: MovingAverageCrossoverStrategy | Sequence[MovingAverageCrossoverStrategy],
         risk_manager: RiskManager,
         notifier: Notifier | None = None,
         config: EngineConfig | None = None,
     ) -> None:
         self.client = client
-        self.strategy = strategy
+        self.strategies = _normalise_strategies(strategy)
+        self.strategy = self.strategies[0]
         self.risk_manager = risk_manager
         self.notifier = notifier or NullNotifier()
         self.config = config or EngineConfig()
@@ -92,6 +94,9 @@ class TradingEngine:
             last_error=self._last_error,
         )
 
+    def describe_strategies(self) -> tuple[dict[str, str | int], ...]:
+        return tuple(strategy.describe() for strategy in self.strategies)
+
     async def status_text(self) -> str:
         account = self._last_account
         if account is None:
@@ -105,7 +110,7 @@ class TradingEngine:
         return (
             f"running={status.running} paused={status.paused} panic={status.panic_stopped} "
             f"equity_usdt={account.equity_usdt} available_usdt={account.available_usdt} "
-            f"btc_position={account.btc_position_size} failures={status.consecutive_failures} "
+            f"positions={_positions_text(account)} failures={status.consecutive_failures} "
             f"last_decision={status.last_decision} last_risk={status.last_risk_reason}"
         )
 
@@ -151,44 +156,46 @@ class TradingEngine:
             return
         try:
             account = await self.client.fetch_account_snapshot()
-            candles = await self.client.fetch_candles()
             self._last_account = account
-            decision = self.strategy.decide(candles, account)
-            self._last_decision = decision.action.value
-            risk_decision = self.risk_manager.assess(decision, account)
-            self._last_risk_reason = risk_decision.reason
-            log.info(
-                "strategy_decision",
-                action=decision.action.value,
-                reason=decision.reason,
-                inputs=decision.inputs,
-                risk_allowed=risk_decision.allowed,
-                risk_reason=risk_decision.reason,
-            )
-
-            if not risk_decision.allowed:
-                await self.notifier.send(
-                    f"Risk blocked {decision.action.value}: "
-                    f"{risk_decision.reason} ({decision.reason})"
+            for strategy in self.strategies:
+                candles = await self.client.fetch_candles(strategy.config.inst_id)
+                decision = strategy.decide(candles, account)
+                self._last_decision = f"{decision.inst_id}:{decision.action.value}"
+                risk_decision = self.risk_manager.assess(decision, account)
+                self._last_risk_reason = risk_decision.reason
+                log.info(
+                    "strategy_decision",
+                    inst_id=decision.inst_id,
+                    action=decision.action.value,
+                    reason=decision.reason,
+                    inputs=decision.inputs,
+                    risk_allowed=risk_decision.allowed,
+                    risk_reason=risk_decision.reason,
                 )
-                return
-            if decision.action is DecisionAction.HOLD:
-                self.risk_manager.record_success()
-                return
 
-            order = OrderRequest(
-                inst_id=decision.inst_id,
-                side=decision.action,
-                size_btc=decision.size_btc,
-                td_mode=self.config.td_mode,
-            )
-            result = await self.client.place_market_order(order)
-            self.risk_manager.record_trade()
-            self.risk_manager.record_success()
-            await self.notifier.send(
-                f"Order submitted: {result.side.value} {result.size_btc} {result.inst_id} "
-                f"order_id={result.order_id} reason={decision.reason}"
-            )
+                if not risk_decision.allowed:
+                    await self.notifier.send(
+                        f"Risk blocked {decision.inst_id} {decision.action.value}: "
+                        f"{risk_decision.reason} ({decision.reason})"
+                    )
+                    continue
+                if decision.action is DecisionAction.HOLD:
+                    self.risk_manager.record_success()
+                    continue
+
+                order = OrderRequest(
+                    inst_id=decision.inst_id,
+                    side=decision.action,
+                    size_btc=decision.size_btc,
+                    td_mode=self.config.td_mode,
+                )
+                result = await self.client.place_market_order(order)
+                self.risk_manager.record_trade(inst_id=decision.inst_id)
+                self.risk_manager.record_success()
+                await self.notifier.send(
+                    f"Order submitted: {result.side.value} {result.size_btc} {result.inst_id} "
+                    f"order_id={result.order_id} reason={decision.reason}"
+                )
         except Exception as exc:  # noqa: BLE001 - engine must convert all failures into risk state
             self.risk_manager.record_failure()
             self._last_error = str(exc)
@@ -197,3 +204,20 @@ class TradingEngine:
             if self.risk_manager.stopped_by_failures:
                 self._paused = True
                 await self.notifier.send("Trading paused: max consecutive failures reached")
+
+
+def _normalise_strategies(
+    strategy: MovingAverageCrossoverStrategy | Sequence[MovingAverageCrossoverStrategy],
+) -> tuple[MovingAverageCrossoverStrategy, ...]:
+    if isinstance(strategy, MovingAverageCrossoverStrategy):
+        return (strategy,)
+    strategies = tuple(strategy)
+    if not strategies:
+        raise ValueError("at least one strategy is required")
+    return strategies
+
+
+def _positions_text(account: AccountSnapshot) -> str:
+    if not account.positions:
+        return "none"
+    return ",".join(f"{position.inst_id}:{position.size_btc}" for position in account.positions)

@@ -101,3 +101,25 @@ def test_strategy_treats_dust_position_as_flat_for_buy_signal() -> None:
     decision = strategy.decide(candles(["100", "101", "110"]), account)
 
     assert decision.action is DecisionAction.BUY
+
+
+def test_strategy_uses_position_for_its_own_symbol() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(
+            inst_id="ETH-USDT",
+            fast_window=2,
+            slow_window=3,
+            trade_size_btc=Decimal("0.01"),
+        )
+    )
+    account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        positions=(Position(inst_id="ETH-USDT", size_btc=Decimal("0.02")),),
+    )
+
+    decision = strategy.decide(candles(["110", "101", "100"]), account)
+
+    assert decision.action is DecisionAction.SELL
+    assert decision.inst_id == "ETH-USDT"
+    assert decision.size_btc == Decimal("0.01")

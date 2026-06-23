@@ -9,6 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from lumiere.risk import RiskConfig
 from lumiere.strategy import MovingAverageCrossoverConfig
 
+SUPPORTED_INST_IDS = ("BTC-USDT", "ETH-USDT")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -23,6 +25,7 @@ class Settings(BaseSettings):
     okx_passphrase: str = Field(min_length=1)
     okx_flag: str = "1"
     okx_inst_id: str = "BTC-USDT"
+    okx_inst_ids: str = ""
     okx_td_mode: str = "cash"
     okx_order_tag: str = "lumieredemo"
 
@@ -36,10 +39,14 @@ class Settings(BaseSettings):
     strategy_fast_window: int = 5
     strategy_slow_window: int = 20
     strategy_trade_size_btc: Decimal = Decimal("0.001")
+    strategy_trade_size_eth: Decimal = Decimal("0.01")
     strategy_dust_threshold_btc: Decimal = Decimal("0.00001")
+    strategy_dust_threshold_eth: Decimal = Decimal("0.0001")
 
     risk_max_position_btc: Decimal = Decimal("0.005")
+    risk_max_position_eth: Decimal = Decimal("0.05")
     risk_min_order_btc: Decimal = Decimal("0.00001")
+    risk_min_order_eth: Decimal = Decimal("0.0001")
     risk_max_daily_loss_usdt: Decimal = Decimal("25")
     risk_cooldown_seconds: int = 300
     risk_max_consecutive_failures: int = 3
@@ -53,9 +60,15 @@ class Settings(BaseSettings):
 
     @field_validator("okx_inst_id")
     @classmethod
-    def btc_only(cls, value: str) -> str:
-        if not value.startswith("BTC-"):
-            raise ValueError("Lumiere is BTC-only; OKX_INST_ID must start with BTC-")
+    def supported_inst_id(cls, value: str) -> str:
+        _validate_supported_inst_ids((value,))
+        return value
+
+    @field_validator("okx_inst_ids")
+    @classmethod
+    def supported_inst_ids(cls, value: str) -> str:
+        if value.strip():
+            _validate_supported_inst_ids(_parse_inst_ids(value))
         return value
 
     @field_validator("okx_order_tag")
@@ -66,6 +79,14 @@ class Settings(BaseSettings):
         return value
 
     @cached_property
+    def enabled_inst_ids(self) -> tuple[str, ...]:
+        inst_ids = (
+            _parse_inst_ids(self.okx_inst_ids) if self.okx_inst_ids.strip() else (self.okx_inst_id,)
+        )
+        _validate_supported_inst_ids(inst_ids)
+        return inst_ids
+
+    @cached_property
     def allowed_chat_ids(self) -> set[int]:
         if not self.telegram_allowed_chat_ids.strip():
             return set()
@@ -74,21 +95,69 @@ class Settings(BaseSettings):
         }
 
     def strategy_config(self) -> MovingAverageCrossoverConfig:
-        return MovingAverageCrossoverConfig(
-            inst_id=self.okx_inst_id,
-            fast_window=self.strategy_fast_window,
-            slow_window=self.strategy_slow_window,
-            trade_size_btc=self.strategy_trade_size_btc,
-            dust_threshold_btc=self.strategy_dust_threshold_btc,
+        return self.strategy_configs()[0]
+
+    def strategy_configs(self) -> tuple[MovingAverageCrossoverConfig, ...]:
+        return tuple(
+            MovingAverageCrossoverConfig(
+                inst_id=inst_id,
+                fast_window=self.strategy_fast_window,
+                slow_window=self.strategy_slow_window,
+                trade_size_btc=self._trade_size_for(inst_id),
+                dust_threshold_btc=self._dust_threshold_for(inst_id),
+            )
+            for inst_id in self.enabled_inst_ids
         )
 
     def risk_config(self) -> RiskConfig:
         return RiskConfig(
             demo_flag=self.okx_flag,
-            allowed_inst_ids=(self.okx_inst_id,),
+            allowed_inst_ids=self.enabled_inst_ids,
             max_position_btc=self.risk_max_position_btc,
             min_order_btc=self.risk_min_order_btc,
             max_daily_loss_usdt=self.risk_max_daily_loss_usdt,
             cooldown_seconds=self.risk_cooldown_seconds,
             max_consecutive_failures=self.risk_max_consecutive_failures,
+            max_position_by_inst_id={
+                inst_id: self._max_position_for(inst_id) for inst_id in self.enabled_inst_ids
+            },
+            min_order_by_inst_id={
+                inst_id: self._min_order_for(inst_id) for inst_id in self.enabled_inst_ids
+            },
+        )
+
+    def _trade_size_for(self, inst_id: str) -> Decimal:
+        if inst_id.startswith("ETH-"):
+            return self.strategy_trade_size_eth
+        return self.strategy_trade_size_btc
+
+    def _dust_threshold_for(self, inst_id: str) -> Decimal:
+        if inst_id.startswith("ETH-"):
+            return self.strategy_dust_threshold_eth
+        return self.strategy_dust_threshold_btc
+
+    def _max_position_for(self, inst_id: str) -> Decimal:
+        if inst_id.startswith("ETH-"):
+            return self.risk_max_position_eth
+        return self.risk_max_position_btc
+
+    def _min_order_for(self, inst_id: str) -> Decimal:
+        if inst_id.startswith("ETH-"):
+            return self.risk_min_order_eth
+        return self.risk_min_order_btc
+
+
+def _parse_inst_ids(raw: str) -> tuple[str, ...]:
+    inst_ids = tuple(part.strip().upper() for part in raw.split(",") if part.strip())
+    if not inst_ids:
+        raise ValueError("at least one OKX instrument id is required")
+    return inst_ids
+
+
+def _validate_supported_inst_ids(inst_ids: tuple[str, ...]) -> None:
+    unsupported = [inst_id for inst_id in inst_ids if inst_id not in SUPPORTED_INST_IDS]
+    if unsupported:
+        supported = ", ".join(SUPPORTED_INST_IDS)
+        raise ValueError(
+            f"unsupported instrument(s): {', '.join(unsupported)}; supported symbols: {supported}"
         )

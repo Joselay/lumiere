@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -47,10 +48,11 @@ class OKXDemoClient:
         self._market = MarketData.MarketAPI(flag=settings.okx_flag, debug=False)
         self._trade = Trade.TradeAPI(**common)
 
-    async def fetch_candles(self) -> list[MarketCandle]:
+    async def fetch_candles(self, inst_id: str | None = None) -> list[MarketCandle]:
+        inst_id = inst_id or self.settings.enabled_inst_ids[0]
         response = await asyncio.to_thread(
             self._market.get_candlesticks,
-            instId=self.settings.okx_inst_id,
+            instId=inst_id,
             bar=self.settings.engine_candle_bar,
             limit=str(self.settings.engine_candle_limit),
         )
@@ -59,21 +61,32 @@ class OKXDemoClient:
         return sorted(candles, key=lambda candle: candle.ts)
 
     async def fetch_account_snapshot(self) -> AccountSnapshot:
-        balance_response, positions_response = await asyncio.gather(
+        inst_ids = self.settings.enabled_inst_ids
+        responses = await asyncio.gather(
             asyncio.to_thread(self._account.get_account_balance),
-            asyncio.to_thread(self._account.get_positions, instId=self.settings.okx_inst_id),
+            *(
+                asyncio.to_thread(self._account.get_positions, instId=inst_id)
+                for inst_id in inst_ids
+            ),
         )
+        balance_response = responses[0]
+        position_responses = responses[1:]
         balance_data = _require_ok_response(balance_response)
-        positions_data = _require_ok_response(positions_response)
-        equity, available, spot_btc_position = _parse_account_balances(
-            balance_data,
-            self.settings.okx_inst_id,
+        equity, available, spot_positions = _parse_account_balances(balance_data, inst_ids)
+
+        positions_by_inst_id = {position.inst_id: position for position in spot_positions}
+        for inst_id, response in zip(inst_ids, position_responses, strict=True):
+            derivatives_position = _parse_position(inst_id, _require_ok_response(response))
+            if derivatives_position is not None:
+                positions_by_inst_id[inst_id] = derivatives_position
+
+        positions = tuple(
+            positions_by_inst_id[inst_id] for inst_id in inst_ids if inst_id in positions_by_inst_id
         )
-        derivatives_position = _parse_btc_position(self.settings.okx_inst_id, positions_data)
         return AccountSnapshot(
             equity_usdt=equity,
             available_usdt=available,
-            btc_position=derivatives_position or spot_btc_position,
+            positions=positions,
             daily_realized_pnl_usdt=Decimal("0"),
         )
 
@@ -108,20 +121,21 @@ class OKXDemoClient:
         )
 
     async def cancel_open_orders(self) -> list[dict[str, Any]]:
-        response = await asyncio.to_thread(
-            self._trade.get_order_list,
-            instId=self.settings.okx_inst_id,
-        )
-        open_orders = _require_ok_response(response)
         cancelled: list[dict[str, Any]] = []
-        for order in open_orders:
-            cancel_response = await asyncio.to_thread(
-                self._trade.cancel_order,
-                instId=self.settings.okx_inst_id,
-                ordId=str(order.get("ordId", "")),
-                clOrdId=str(order.get("clOrdId", "")),
+        for inst_id in self.settings.enabled_inst_ids:
+            response = await asyncio.to_thread(
+                self._trade.get_order_list,
+                instId=inst_id,
             )
-            cancelled.extend(_require_ok_response(cancel_response))
+            open_orders = _require_ok_response(response)
+            for order in open_orders:
+                cancel_response = await asyncio.to_thread(
+                    self._trade.cancel_order,
+                    instId=inst_id,
+                    ordId=str(order.get("ordId", "")),
+                    clOrdId=str(order.get("clOrdId", "")),
+                )
+                cancelled.extend(_require_ok_response(cancel_response))
         return cancelled
 
 
@@ -180,31 +194,36 @@ def _parse_candle(row: list[str]) -> MarketCandle:
 
 def _parse_account_balances(
     data: list[dict[str, Any]],
-    inst_id: str,
-) -> tuple[Decimal, Decimal, Position | None]:
+    inst_ids: Iterable[str],
+) -> tuple[Decimal, Decimal, tuple[Position, ...]]:
     if not data:
-        return Decimal("0"), Decimal("0"), None
+        return Decimal("0"), Decimal("0"), ()
 
+    inst_ids = tuple(inst_ids)
     account = data[0]
     equity = Decimal(str(account.get("totalEq") or "0"))
     available_usdt = Decimal("0")
-    btc_size = Decimal("0")
-    base_ccy = inst_id.split("-")[0]
+    base_ccy_by_inst_id = {inst_id: inst_id.split("-")[0] for inst_id in inst_ids}
+    size_by_base_ccy = dict.fromkeys(base_ccy_by_inst_id.values(), Decimal("0"))
 
     for detail in account.get("details", []):
         ccy = detail.get("ccy")
         if ccy == "USDT":
             available_usdt = Decimal(str(detail.get("availBal") or detail.get("cashBal") or "0"))
-        if ccy == base_ccy:
-            btc_size = Decimal(str(detail.get("cashBal") or detail.get("availBal") or "0"))
+        if ccy in size_by_base_ccy:
+            size_by_base_ccy[ccy] = Decimal(
+                str(detail.get("cashBal") or detail.get("availBal") or "0")
+            )
 
-    position = None
-    if btc_size != 0:
-        position = Position(inst_id=inst_id, size_btc=btc_size)
-    return equity, available_usdt, position
+    positions = tuple(
+        Position(inst_id=inst_id, size_btc=size_by_base_ccy[base_ccy])
+        for inst_id, base_ccy in base_ccy_by_inst_id.items()
+        if size_by_base_ccy[base_ccy] != 0
+    )
+    return equity, available_usdt, positions
 
 
-def _parse_btc_position(inst_id: str, data: list[dict[str, Any]]) -> Position | None:
+def _parse_position(inst_id: str, data: list[dict[str, Any]]) -> Position | None:
     for row in data:
         if row.get("instId") != inst_id:
             continue
@@ -218,3 +237,7 @@ def _parse_btc_position(inst_id: str, data: list[dict[str, Any]]) -> Position | 
             unrealized_pnl_usdt=Decimal(str(row.get("upl") or "0")),
         )
     return None
+
+
+def _parse_btc_position(inst_id: str, data: list[dict[str, Any]]) -> Position | None:
+    return _parse_position(inst_id, data)
