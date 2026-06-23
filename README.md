@@ -1,5 +1,10 @@
 # Lumiere
 
+<p>
+  <img src="assets/btc.svg" alt="Bitcoin" width="32" height="32">
+  <img src="assets/eth.svg" alt="Ethereum" width="32" height="32">
+</p>
+
 Lumiere is a Python trading automation workspace for OKX demo trading.
 
 The project is intended to evolve over time. Trading behavior and architecture live in the source code and tests.
