@@ -1,0 +1,41 @@
+[project]
+name = "lumiere"
+version = "0.1.0"
+description = "Deterministic Telegram bot for automated BTC trading on OKX demo"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "aiogram>=3.13,<4",
+  "pydantic-settings>=2.6,<3",
+  "python-okx==0.4.1",
+  "structlog>=24.4,<26",
+]
+
+[project.scripts]
+lumiere-bot = "lumiere.main:run"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.24,<2",
+  "ruff>=0.8,<1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "lumiere"
+module-root = "src"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+import asyncio
+
+from lumiere.config import Settings
+from lumiere.engine import EngineConfig, TradingEngine
+from lumiere.logging_config import configure_logging
+from lumiere.okx_client import OKXDemoClient
+from lumiere.risk import RiskManager
+from lumiere.strategy import MovingAverageCrossoverStrategy
+from lumiere.telegram_bot import run_bot
+
+
+def build_engine(settings: Settings) -> TradingEngine:
+    risk_manager = RiskManager(settings.risk_config())
+    strategy = MovingAverageCrossoverStrategy(settings.strategy_config())
+    client = OKXDemoClient(settings, risk_manager)
+    return TradingEngine(
+        client=client,
+        strategy=strategy,
+        risk_manager=risk_manager,
+        config=EngineConfig(
+            poll_interval_seconds=settings.engine_poll_interval_seconds,
+            td_mode=settings.okx_td_mode,
+        ),
+    )
+
+
+async def main() -> None:
+    configure_logging()
+    settings = Settings()
+    engine = build_engine(settings)
+    await run_bot(
+        bot_token=settings.telegram_bot_token,
+        engine=engine,
+        allowed_chat_ids=settings.allowed_chat_ids,
+    )
+
+
+def run() -> None:
+    asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()

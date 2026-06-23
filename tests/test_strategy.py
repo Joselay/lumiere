@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position
+from lumiere.strategy import MovingAverageCrossoverConfig, MovingAverageCrossoverStrategy
+
+
+def candles(closes: list[str]) -> list[MarketCandle]:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    return [
+        MarketCandle(
+            ts=start + timedelta(minutes=i),
+            open=Decimal(close),
+            high=Decimal(close),
+            low=Decimal(close),
+            close=Decimal(close),
+        )
+        for i, close in enumerate(closes)
+    ]
+
+
+def test_strategy_is_deterministic_for_same_inputs() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(fast_window=2, slow_window=3, trade_size_btc=Decimal("0.01"))
+    )
+    account = AccountSnapshot(equity_usdt=Decimal("1000"), available_usdt=Decimal("1000"))
+    market = candles(["100", "101", "110"])
+
+    first = strategy.decide(market, account)
+    second = strategy.decide(market, account)
+
+    assert first == second
+    assert first.action is DecisionAction.BUY
+    assert first.reason == "fast_ma_above_slow_ma_and_flat"
+
+
+def test_strategy_sells_when_fast_average_crosses_below_slow_and_long() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(fast_window=2, slow_window=3, trade_size_btc=Decimal("0.01"))
+    )
+    account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position(inst_id="BTC-USDT", size_btc=Decimal("0.004")),
+    )
+
+    decision = strategy.decide(candles(["110", "101", "100"]), account)
+
+    assert decision.action is DecisionAction.SELL
+    assert decision.size_btc == Decimal("0.004")
+
+
+def test_strategy_holds_without_enough_candles() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(fast_window=2, slow_window=3)
+    )
+    account = AccountSnapshot(equity_usdt=Decimal("1000"), available_usdt=Decimal("1000"))
+
+    decision = strategy.decide(candles(["100", "101"]), account)
+
+    assert decision.action is DecisionAction.HOLD
+    assert decision.reason == "not_enough_candles"

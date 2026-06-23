@@ -1,0 +1,20 @@
+# Local secrets/config
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Runtime logs/state
+logs/
+*.log
+state.json
