@@ -42,6 +42,26 @@ class BuyThenHoldStrategy(BuyFirstClosedCandleStrategy):
         return StrategyDecision.hold(self.config.inst_id, "already_long")
 
 
+class HistoryLengthSpyStrategy:
+    name = "history_length_spy"
+
+    class Config:
+        inst_id = "BTC-USDT"
+        slow_window = 3
+
+    config = Config()
+
+    def __init__(self) -> None:
+        self.history_lengths: list[int] = []
+
+    def describe(self) -> dict[str, str]:
+        return {"name": self.name, "inst_id": self.config.inst_id}
+
+    def decide(self, candles: list[MarketCandle], account: AccountSnapshot) -> StrategyDecision:
+        self.history_lengths.append(len(candles))
+        return StrategyDecision.hold(self.config.inst_id, "recorded_history_length")
+
+
 def candles(closes: list[str]) -> list[MarketCandle]:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     return [
@@ -197,3 +217,14 @@ def test_backtest_models_rejected_orders() -> None:
 
     assert report.metrics.trade_count == 0
     assert report.rejected_order_count > 0
+
+
+def test_backtest_caps_strategy_history_for_bounded_window_strategies() -> None:
+    strategy = HistoryLengthSpyStrategy()
+
+    Backtester(
+        strategy,
+        BacktestConfig(include_same_close_comparison=False),
+    ).run(candles(["100", "101", "102", "103", "104", "105"]))
+
+    assert strategy.history_lengths == [1, 2, 3, 3, 3, 3]

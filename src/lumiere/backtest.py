@@ -320,6 +320,8 @@ class Backtester:
         cost_model = self.config.cost_model
         quality = ExecutionQualityAccumulator(policy=cost_model.execution_policy)
         inst_id = self.strategy.config.inst_id
+        account_peak_equity: Decimal | None = None
+        account_max_drawdown = Decimal("0")
 
         for index, candle in enumerate(ordered_candles):
             pending_still_open = False
@@ -378,14 +380,18 @@ class Backtester:
                     pending_decision = None
 
             current_equity = cash + position * candle.close
+            if account_peak_equity is None or current_equity > account_peak_equity:
+                account_peak_equity = current_equity
+            account_max_drawdown = max(
+                account_max_drawdown,
+                account_peak_equity - current_equity,
+            )
             account = AccountSnapshot(
                 equity_usdt=current_equity,
                 available_usdt=cash,
                 positions=((Position(inst_id=inst_id, size_btc=position),) if position > 0 else ()),
                 daily_trade_count=len(fills),
-                max_drawdown_usdt=max_drawdown_usdt(
-                    (*equity_curve, EquityPoint(candle.ts, current_equity))
-                ),
+                max_drawdown_usdt=account_max_drawdown,
                 spread_bps=cost_model.spread_bps,
                 estimated_slippage_bps=cost_model.slippage_bps + cost_model.market_impact_bps,
                 estimated_total_cost_bps=cost_model.order_cost_bps + cost_model.taker_fee_bps,
@@ -415,7 +421,7 @@ class Backtester:
                 highest_since_entry,
             )
             decision = exit_decision or self.strategy.decide(
-                list(ordered_candles[: index + 1]),
+                _decision_history(self.strategy, ordered_candles, index),
                 account,
             )
             if decision.action in {DecisionAction.BUY, DecisionAction.SELL}:
@@ -737,6 +743,33 @@ def _quality_average(total: Decimal, count: int) -> Decimal | None:
     if count <= 0:
         return None
     return total / Decimal(count)
+
+
+def _decision_history(
+    strategy: TradingStrategy,
+    candles: tuple[MarketCandle, ...],
+    index: int,
+) -> list[MarketCandle]:
+    required_bars = _strategy_required_history_bars(strategy)
+    start = 0 if required_bars is None else max(0, index + 1 - required_bars)
+    return list(candles[start : index + 1])
+
+
+def _strategy_required_history_bars(strategy: TradingStrategy) -> int | None:
+    config = getattr(strategy, "config", None)
+    if config is None:
+        return None
+    slow_window = getattr(config, "slow_window", None)
+    if slow_window is not None:
+        return int(slow_window)
+    rsi_period = getattr(config, "rsi_period", None)
+    if rsi_period is not None:
+        return int(rsi_period) + 1
+    lookback = getattr(config, "lookback", None)
+    atr_period = getattr(config, "atr_period", None)
+    if lookback is not None or atr_period is not None:
+        return max(int(lookback or 0) + 1, int(atr_period or 0) + 1)
+    return None
 
 
 def _synthetic_order_book(cost_model: CostModel, mid_price: Decimal) -> OrderBookTop:

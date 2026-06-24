@@ -300,8 +300,10 @@ def calibrate_expectancy(
         estimated_total_cost_bps=config.cost_model.order_cost_bps + config.cost_model.taker_fee_bps,
         performance_gate_passed=True,
     )
+    required_bars = _candidate_required_history_bars(candidate)
     for index in range(0, len(ordered) - horizon):
-        decision = strategy.decide(list(ordered[: index + 1]), account)
+        start = max(0, index + 1 - required_bars)
+        decision = strategy.decide(list(ordered[start : index + 1]), account)
         if decision.action is not DecisionAction.BUY:
             continue
         entry = ordered[index].close
@@ -610,6 +612,21 @@ def _candidate_value(candidate: OptimizerCandidate, field: str, default):
         return default
     value = getattr(candidate, field)
     return default if value is None else value
+
+
+def _candidate_required_history_bars(candidate: OptimizerCandidate) -> int:
+    if isinstance(candidate, MovingAverageCandidate):
+        return candidate.slow_window
+    if candidate.strategy_name == "moving_average_crossover":
+        return int(candidate.slow_window or 20)
+    if candidate.strategy_name == "rsi_mean_reversion":
+        return int(candidate.rsi_period or 14) + 1
+    if candidate.strategy_name == "volatility_breakout":
+        return max(
+            int(candidate.breakout_lookback or 20) + 1,
+            int(candidate.breakout_atr_period or 14) + 1,
+        )
+    return 1
 
 
 def _overfit_rejection_reason(
