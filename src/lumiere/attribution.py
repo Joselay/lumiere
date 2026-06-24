@@ -178,11 +178,14 @@ class AttributionLedger:
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
         slippages = _slippage_bps(fill_events)
         order_completeness = _order_completeness(events, fill_events)
+        inventory_completeness = _inventory_completeness(fill_events)
         alerts = _alerts(metrics.to_dict(), rejection_counts, slippages, events)
         if order_completeness["orders_without_final_attribution"]:
             alerts.append("orders_missing_final_attribution")
         if order_completeness["filled_orders_without_fills"]:
             alerts.append("orders_missing_fill_attribution")
+        if inventory_completeness["sell_fills_without_cost_basis"]:
+            alerts.append("fills_without_cost_basis")
         payload = metrics.to_dict()
         average_slippage = None if not slippages else sum(slippages) / len(slippages)
         payload["average_slippage_bps"] = (
@@ -191,6 +194,7 @@ class AttributionLedger:
         payload["realized_slippage_bps"] = payload["average_slippage_bps"]
         payload["risk_rejections"] = rejection_counts
         payload["fill_completeness"] = order_completeness
+        payload["inventory_completeness"] = inventory_completeness
         payload["baseline_comparison"] = {"no_trade_pnl_usdt": "0"}
         return AttributionReport(start, now, payload, rejection_counts, tuple(alerts))
 
@@ -329,6 +333,36 @@ def _order_completeness(
         "orders": len(orders),
         "orders_without_final_attribution": missing_final,
         "filled_orders_without_fills": missing_fills,
+    }
+
+
+def _inventory_completeness(fill_events: list[dict[str, Any]]) -> dict[str, Any]:
+    size_by_inst: dict[str, Decimal] = {}
+    uncosted_size_by_inst: dict[str, Decimal] = {}
+    missing_cost_basis = 0
+    for fill in sorted(fill_events, key=lambda event: _parse_datetime(str(event["ts"]))):
+        inst_id = str(fill.get("inst_id") or "")
+        size = Decimal(str(fill.get("size_base") or "0"))
+        if size <= 0:
+            continue
+        current_size = size_by_inst.get(inst_id, Decimal("0"))
+        if str(fill.get("side") or "") == DecisionAction.BUY.value:
+            size_by_inst[inst_id] = current_size + size
+            continue
+        uncosted_size = max(size - current_size, Decimal("0"))
+        if uncosted_size > 0:
+            missing_cost_basis += 1
+            uncosted_size_by_inst[inst_id] = (
+                uncosted_size_by_inst.get(inst_id, Decimal("0")) + uncosted_size
+            )
+        size_by_inst[inst_id] = max(current_size - size, Decimal("0"))
+    return {
+        "sell_fills_without_cost_basis": missing_cost_basis,
+        "uncosted_sell_size_by_inst": {
+            inst_id: str(size)
+            for inst_id, size in sorted(uncosted_size_by_inst.items())
+            if size > 0
+        },
     }
 
 

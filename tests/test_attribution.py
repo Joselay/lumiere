@@ -75,6 +75,28 @@ def test_attribution_report_dedupes_fills_and_flags_missing_order_attribution(tm
     assert "orders_missing_final_attribution" in report.alerts
 
 
+def test_attribution_report_flags_fills_without_cost_basis(tmp_path) -> None:
+    path = tmp_path / "attribution.jsonl"
+    ledger = AttributionLedger(path)
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    ledger.record_fill(
+        inst_id="BTC-USDT",
+        side=DecisionAction.SELL,
+        size_base=Decimal("1"),
+        price=Decimal("100"),
+        fee=Decimal("0"),
+        ts=ts,
+    )
+
+    report = ledger.report(window=timedelta(days=1), now=ts + timedelta(hours=1))
+
+    assert report.metrics["inventory_completeness"] == {
+        "sell_fills_without_cost_basis": 1,
+        "uncosted_sell_size_by_inst": {"BTC-USDT": "1"},
+    }
+    assert "fills_without_cost_basis" in report.alerts
+
+
 def test_attribution_report_explains_pnl_and_rejections(tmp_path) -> None:
     path = tmp_path / "attribution.jsonl"
     ledger = AttributionLedger(path)
