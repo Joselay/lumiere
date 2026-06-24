@@ -31,6 +31,7 @@ def build_engine(settings: Settings) -> TradingEngine:
         config=EngineConfig(
             poll_interval_seconds=settings.engine_poll_interval_seconds,
             td_mode=settings.okx_td_mode,
+            order_type=settings.okx_order_type,
         ),
         paper_ledger=paper_ledger,
     )
