@@ -71,8 +71,8 @@ async def test_fake_exchange_engine_tick_reaches_fill_attribution_and_telegram(t
     assert exchange.orders[0].side is DecisionAction.BUY
     assert "<b>BUY BTC-USDT</b>" in notifier.messages[-1]
     event_types = [event["type"] for event in attribution.events]
-    assert event_types == ["account", "candle", "decision", "risk", "order", "fill"]
-    fill_event = attribution.events[-1]
+    assert event_types == ["account", "candle", "decision", "risk", "order", "fill", "account"]
+    fill_event = next(event for event in attribution.events if event["type"] == "fill")
     assert fill_event["order_id"] == "ord-1"
     assert fill_event["trade_id"] == "trade-1-1"
     assert Decimal(fill_event["price"]) > Decimal(fill_event["decision_price"])

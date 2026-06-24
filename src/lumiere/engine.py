@@ -13,6 +13,7 @@ import structlog
 from lumiere.attribution import AttributionLedger
 from lumiere.execution import prepare_execution_plan
 from lumiere.ledger import TradeFill
+from lumiere.live_positions import LivePositionState, LivePositionStore
 from lumiere.models import (
     AccountSnapshot,
     DecisionAction,
@@ -76,6 +77,27 @@ class EngineConfig:
     td_mode: str = "cash"
     order_type: str = "market"
     experimental_intrabar: bool = False
+    position_state_path: str | None = None
+    unexpected_position_policy: str = "block"
+    stop_loss_bps: Decimal | None = None
+    take_profit_bps: Decimal | None = None
+    trailing_stop_bps: Decimal | None = None
+    max_bars_in_trade: int | None = None
+    max_position_age_seconds: int | None = None
+    max_unrealized_loss_usdt: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if self.unexpected_position_policy not in {"block", "adopt", "flatten", "ignore"}:
+            raise ValueError("unexpected_position_policy must be block, adopt, flatten, or ignore")
+        for value in (self.stop_loss_bps, self.take_profit_bps, self.trailing_stop_bps):
+            if value is not None and value <= 0:
+                raise ValueError("live exit bps values must be positive when configured")
+        if self.max_bars_in_trade is not None and self.max_bars_in_trade <= 0:
+            raise ValueError("max_bars_in_trade must be positive when configured")
+        if self.max_position_age_seconds is not None and self.max_position_age_seconds <= 0:
+            raise ValueError("max_position_age_seconds must be positive when configured")
+        if self.max_unrealized_loss_usdt is not None and self.max_unrealized_loss_usdt <= 0:
+            raise ValueError("max_unrealized_loss_usdt must be positive when configured")
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +130,7 @@ class TradingEngine:
         self.config = config or EngineConfig()
         self.paper_ledger = paper_ledger
         self.attribution_ledger = attribution_ledger
+        self.position_store = LivePositionStore(self.config.position_state_path)
         self._paused = False
         self._panic_stopped = False
         self._running = False
@@ -140,6 +163,9 @@ class TradingEngine:
 
     def describe_strategies(self) -> tuple[dict, ...]:
         return tuple(strategy.describe() for strategy in self.strategies)
+
+    def describe_live_positions(self) -> tuple[dict, ...]:
+        return self.position_store.describe(self._last_account)
 
     async def status_text(self) -> str:
         account = self._last_account
@@ -230,9 +256,7 @@ class TradingEngine:
             log.info("engine_tick_skipped", paused=self._paused, panic_stopped=self._panic_stopped)
             return
         try:
-            account = await self.client.fetch_account_snapshot()
-            account = self._account_with_paper_gate(account)
-            self._last_account = account
+            account = await self._refresh_account()
             self._record_attribution_account(account)
             for strategy in self.strategies:
                 raw_candles = await self.client.fetch_candles(strategy.config.inst_id)
@@ -245,8 +269,13 @@ class TradingEngine:
                     )
                     continue
                 self._record_attribution_candles(strategy.config.inst_id, candles)
-                decision = strategy.decide(candles, account)
-                self._record_paper_decision(strategy, candles)
+                decision, record_paper = self._live_exit_or_strategy_decision(
+                    strategy,
+                    candles,
+                    account,
+                )
+                if record_paper:
+                    self._record_paper_decision(strategy, candles)
                 self._record_attribution_decision(strategy.name, decision, candles)
                 self._last_decision = f"{decision.inst_id}:{decision.action.value}"
                 execution_plan = prepare_execution_plan(
@@ -256,6 +285,7 @@ class TradingEngine:
                     mark_price=candles[-1].close,
                 )
                 risk_decision = execution_plan.risk_decision
+                decision = execution_plan.decision
                 self._record_attribution_risk(decision, risk_decision, candles)
                 self._last_risk_reason = risk_decision.reason
                 decision_log = log.debug if decision.action is DecisionAction.HOLD else log.info
@@ -307,7 +337,21 @@ class TradingEngine:
                 submitted_at = utc_now()
                 result = await self.client.place_market_order(order)
                 self._record_attribution_order(order, result, candles)
-                await self._record_attribution_fills(result, decision, candles, submitted_at)
+                fills = await self._record_attribution_fills(
+                    result,
+                    decision,
+                    candles,
+                    submitted_at,
+                )
+                self.position_store.record_order_execution(
+                    decision,
+                    result,
+                    fills=fills,
+                    candle=candles[-1],
+                    strategy_name=strategy.name,
+                )
+                account = await self._refresh_account()
+                self._record_attribution_account(account)
                 self.risk_manager.record_trade(inst_id=decision.inst_id)
                 self.risk_manager.record_success()
                 log.info(
@@ -329,6 +373,208 @@ class TradingEngine:
                 await self.notifier.send(
                     "⏸️ <b>Trading paused</b>\nMax consecutive failures reached"
                 )
+
+    async def _refresh_account(self) -> AccountSnapshot:
+        account = await self.client.fetch_account_snapshot()
+        account = self._account_with_paper_gate(account)
+        self.position_store.reconcile_account(account)
+        self._last_account = account
+        return account
+
+    def _live_exit_or_strategy_decision(
+        self,
+        strategy: TradingStrategy,
+        candles: list[MarketCandle],
+        account: AccountSnapshot,
+    ) -> tuple[StrategyDecision, bool]:
+        candle = candles[-1]
+        inst_id = strategy.config.inst_id
+        position = account.position_for(inst_id)
+        state = self.position_store.get(inst_id)
+
+        if position is not None and position.size_base > 0 and state is None:
+            unexpected = self._unexpected_position_decision(strategy, position, candle)
+            if unexpected is not None:
+                return unexpected, False
+            state = self.position_store.get(inst_id)
+
+        if position is not None and position.size_base > 0 and state is not None:
+            observed_state = self.position_store.observe_bar(inst_id, candle) or state
+            exit_decision = self._protective_exit_decision(position, observed_state, candle)
+            if exit_decision is not None:
+                return exit_decision, False
+
+        return strategy.decide(candles, account), True
+
+    def _unexpected_position_decision(
+        self,
+        strategy: TradingStrategy,
+        position,
+        candle: MarketCandle,
+    ) -> StrategyDecision | None:
+        policy = self.config.unexpected_position_policy
+        inputs = {
+            "decision_price": str(candle.close),
+            "position_base": str(position.size_base),
+            "unexpected_position_policy": policy,
+        }
+        if policy == "block":
+            log.warning(
+                "unexpected_position_blocked",
+                inst_id=position.inst_id,
+                position_base=str(position.size_base),
+            )
+            return StrategyDecision.hold(
+                position.inst_id,
+                "unexpected_position_requires_flatten_ignore_or_adopt",
+                inputs,
+            )
+        if policy == "flatten":
+            log.warning(
+                "unexpected_position_flattening",
+                inst_id=position.inst_id,
+                position_base=str(position.size_base),
+            )
+            return StrategyDecision(
+                DecisionAction.SELL,
+                position.inst_id,
+                position.size_base,
+                "unexpected_position_flatten",
+                inputs | {"protective_exit": "true"},
+            )
+        if policy == "adopt":
+            self.position_store.adopt_unexpected_position(
+                position,
+                current_price=candle.close,
+                now=candle.ts,
+                strategy_name=strategy.name,
+            )
+            log.warning(
+                "unexpected_position_adopted",
+                inst_id=position.inst_id,
+                position_base=str(position.size_base),
+            )
+            return None
+        log.warning(
+            "unexpected_position_ignored",
+            inst_id=position.inst_id,
+            position_base=str(position.size_base),
+        )
+        return None
+
+    def _protective_exit_decision(
+        self,
+        position,
+        state: LivePositionState,
+        candle: MarketCandle,
+    ) -> StrategyDecision | None:
+        close = candle.close
+        if self.config.stop_loss_bps is not None:
+            stop_price = state.entry_price * (
+                Decimal("1") - self.config.stop_loss_bps / Decimal("10000")
+            )
+            if close <= stop_price:
+                return self._live_exit_decision(
+                    "live_stop_loss",
+                    position,
+                    state,
+                    candle,
+                    {
+                        "stop_price": str(stop_price),
+                        "stop_loss_bps": str(self.config.stop_loss_bps),
+                    },
+                )
+        if (
+            self.config.max_unrealized_loss_usdt is not None
+            and position.unrealized_pnl_usdt <= -self.config.max_unrealized_loss_usdt
+        ):
+            return self._live_exit_decision(
+                "live_max_unrealized_loss",
+                position,
+                state,
+                candle,
+                {"max_unrealized_loss_usdt": str(self.config.max_unrealized_loss_usdt)},
+            )
+        if self.config.trailing_stop_bps is not None:
+            trailing_stop = state.highest_price * (
+                Decimal("1") - self.config.trailing_stop_bps / Decimal("10000")
+            )
+            if close <= trailing_stop:
+                return self._live_exit_decision(
+                    "live_trailing_stop",
+                    position,
+                    state,
+                    candle,
+                    {
+                        "trailing_stop": str(trailing_stop),
+                        "trailing_stop_bps": str(self.config.trailing_stop_bps),
+                    },
+                )
+        if self.config.take_profit_bps is not None:
+            take_profit = state.entry_price * (
+                Decimal("1") + self.config.take_profit_bps / Decimal("10000")
+            )
+            if close >= take_profit:
+                return self._live_exit_decision(
+                    "live_take_profit",
+                    position,
+                    state,
+                    candle,
+                    {
+                        "take_profit_price": str(take_profit),
+                        "take_profit_bps": str(self.config.take_profit_bps),
+                    },
+                )
+        if (
+            self.config.max_bars_in_trade is not None
+            and state.bars_open >= self.config.max_bars_in_trade
+        ):
+            return self._live_exit_decision(
+                "live_max_bars_exit",
+                position,
+                state,
+                candle,
+                {"max_bars_in_trade": str(self.config.max_bars_in_trade)},
+            )
+        if (
+            self.config.max_position_age_seconds is not None
+            and (candle.ts - state.opened_at).total_seconds()
+            >= self.config.max_position_age_seconds
+        ):
+            return self._live_exit_decision(
+                "live_max_age_exit",
+                position,
+                state,
+                candle,
+                {"max_position_age_seconds": str(self.config.max_position_age_seconds)},
+            )
+        return None
+
+    def _live_exit_decision(
+        self,
+        reason: str,
+        position,
+        state: LivePositionState,
+        candle: MarketCandle,
+        extra_inputs: dict[str, str],
+    ) -> StrategyDecision:
+        return StrategyDecision(
+            DecisionAction.SELL,
+            position.inst_id,
+            position.size_base,
+            reason,
+            {
+                "decision_price": str(candle.close),
+                "position_base": str(position.size_base),
+                "entry_price": str(state.entry_price),
+                "highest_price": str(state.highest_price),
+                "opened_at": state.opened_at.isoformat(),
+                "bars_open": str(state.bars_open),
+                "entry_reason": state.entry_reason,
+                "protective_exit": "true",
+            }
+            | extra_inputs,
+        )
 
     def _account_with_paper_gate(self, account: AccountSnapshot) -> AccountSnapshot:
         if self.paper_ledger is None:
@@ -388,20 +634,24 @@ class TradingEngine:
         decision: StrategyDecision,
         candles,
         submitted_at: datetime,
-    ) -> None:
-        if self.attribution_ledger is None or not candles:
-            return
+    ) -> tuple[TradeFill, ...]:
+        if not candles:
+            return ()
         fetch_order_fills = getattr(self.client, "fetch_order_fills", None)
         if fetch_order_fills is None:
-            return
+            return ()
         decision_price = (
             _decimal_or_none(decision.inputs.get("decision_price")) or candles[-1].close
         )
-        fills = await fetch_order_fills(
-            result,
-            decision_price=decision_price,
-            submitted_at=submitted_at,
+        fills = tuple(
+            await fetch_order_fills(
+                result,
+                decision_price=decision_price,
+                submitted_at=submitted_at,
+            )
         )
+        if self.attribution_ledger is None:
+            return fills
         for fill in fills:
             self.attribution_ledger.record_fill(
                 inst_id=fill.inst_id,
@@ -418,6 +668,7 @@ class TradingEngine:
                 latency_ms=fill.latency_ms,
                 raw=fill.raw,
             )
+        return fills
 
     def _attribution_report(self) -> dict | None:
         if self.attribution_ledger is None:

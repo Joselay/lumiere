@@ -135,10 +135,18 @@ class RiskManager:
             return RiskDecision(False, "instrument_not_allowed")
         if self.stopped_by_failures:
             return RiskDecision(False, "max_consecutive_failures_reached")
-        if account.daily_realized_pnl_usdt <= -self.config.max_daily_loss_usdt:
-            return RiskDecision(False, "max_daily_loss_reached")
         if decision.action is DecisionAction.HOLD:
             return RiskDecision(True, "hold_allowed")
+        if _protective_exit(decision):
+            if decision.action is not DecisionAction.SELL:
+                return RiskDecision(False, "protective_exit_must_sell")
+            if decision.size_btc <= 0:
+                return RiskDecision(False, "non_positive_order_size")
+            if decision.size_btc < self.config.min_order_for(decision.inst_id):
+                return RiskDecision(False, "order_size_below_minimum")
+            return RiskDecision(True, "protective_exit_allowed")
+        if account.daily_realized_pnl_usdt <= -self.config.max_daily_loss_usdt:
+            return RiskDecision(False, "max_daily_loss_reached")
         if self.config.performance_gate_required and not account.performance_gate_passed:
             return RiskDecision(False, "performance_gate_not_passed")
         if (
@@ -188,6 +196,8 @@ class RiskManager:
     def clamp_order_size(self, decision: StrategyDecision, account: AccountSnapshot) -> Decimal:
         if decision.action is DecisionAction.HOLD:
             return Decimal("0")
+        if _protective_exit(decision) and decision.action is DecisionAction.SELL:
+            return decision.size_btc
         size = decision.size_btc
         price = _decision_price(decision)
         if price is not None:
@@ -224,6 +234,10 @@ class RiskManager:
 
 def _expected_edge_bps(inputs: Mapping[str, object]) -> Decimal | None:
     return _input_decimal(inputs, "expected_edge_bps")
+
+
+def _protective_exit(decision: StrategyDecision) -> bool:
+    return str(decision.inputs.get("protective_exit", "")).lower() in {"1", "true", "yes"}
 
 
 def _decision_price(decision: StrategyDecision) -> Decimal | None:

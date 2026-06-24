@@ -7,7 +7,7 @@ import structlog
 
 from lumiere.attribution import AttributionLedger
 from lumiere.config import Settings
-from lumiere.engine import EngineConfig, TradingEngine
+from lumiere.engine import TradingEngine
 from lumiere.logging_config import configure_logging
 from lumiere.okx_client import OKXDemoClient
 from lumiere.paper_trading import PaperTradingLedger
@@ -28,11 +28,7 @@ def build_engine(settings: Settings) -> TradingEngine:
         client=client,
         strategy=strategy,
         risk_manager=risk_manager,
-        config=EngineConfig(
-            poll_interval_seconds=settings.engine_poll_interval_seconds,
-            td_mode=settings.okx_td_mode,
-            order_type=settings.okx_order_type,
-        ),
+        config=settings.engine_config(),
         paper_ledger=paper_ledger,
         attribution_ledger=attribution_ledger,
     )

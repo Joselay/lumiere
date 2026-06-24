@@ -9,6 +9,7 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lumiere.backtest import CostModel
+from lumiere.engine import EngineConfig
 from lumiere.paper_gate import PerformanceGateConfig
 from lumiere.paper_trading import PaperTradingConfig
 from lumiere.risk import RiskConfig
@@ -44,6 +45,14 @@ class Settings(BaseSettings):
     engine_poll_interval_seconds: float = 30.0
     engine_candle_bar: str = "1m"
     engine_candle_limit: int = 80
+    live_position_state_path: str = "data/live_positions.json"
+    live_unexpected_position_policy: str = "block"
+    live_stop_loss_bps: Decimal = Decimal("0")
+    live_take_profit_bps: Decimal = Decimal("0")
+    live_trailing_stop_bps: Decimal = Decimal("0")
+    live_max_bars_in_trade: int = 0
+    live_max_position_age_seconds: int = 0
+    live_max_unrealized_loss_usdt: Decimal = Decimal("0")
 
     strategy_name: str = "moving_average_crossover"
     strategy_fast_window: int = 5
@@ -112,6 +121,15 @@ class Settings(BaseSettings):
             raise ValueError("OKX_ORDER_TAG must be alphanumeric and at most 16 characters")
         return value
 
+    @field_validator("live_unexpected_position_policy")
+    @classmethod
+    def live_unexpected_position_policy_supported(cls, value: str) -> str:
+        if value not in {"block", "adopt", "flatten", "ignore"}:
+            raise ValueError(
+                "LIVE_UNEXPECTED_POSITION_POLICY must be block, adopt, flatten, or ignore"
+            )
+        return value
+
     @field_validator("strategy_name")
     @classmethod
     def supported_strategy_name(cls, value: str) -> str:
@@ -177,6 +195,23 @@ class Settings(BaseSettings):
                 breakout_min_atr_pct=self.strategy_breakout_min_atr_pct,
             )
             for inst_id in self.enabled_inst_ids
+        )
+
+    def engine_config(self) -> EngineConfig:
+        return EngineConfig(
+            poll_interval_seconds=self.engine_poll_interval_seconds,
+            td_mode=self.okx_td_mode,
+            order_type=self.okx_order_type,
+            position_state_path=self.live_position_state_path or None,
+            unexpected_position_policy=self.live_unexpected_position_policy,
+            stop_loss_bps=_positive_decimal_or_none(self.live_stop_loss_bps),
+            take_profit_bps=_positive_decimal_or_none(self.live_take_profit_bps),
+            trailing_stop_bps=_positive_decimal_or_none(self.live_trailing_stop_bps),
+            max_bars_in_trade=self.live_max_bars_in_trade or None,
+            max_position_age_seconds=self.live_max_position_age_seconds or None,
+            max_unrealized_loss_usdt=_positive_decimal_or_none(
+                self.live_max_unrealized_loss_usdt
+            ),
         )
 
     def paper_trading_config(self) -> PaperTradingConfig:

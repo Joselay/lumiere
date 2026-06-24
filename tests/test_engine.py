@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from lumiere.engine import EngineConfig, TradingEngine
+from lumiere.live_positions import LivePositionStore
 from lumiere.models import (
     AccountSnapshot,
     DecisionAction,
@@ -13,10 +14,12 @@ from lumiere.models import (
     OrderRequest,
     OrderResult,
     Position,
+    StrategyDecision,
 )
 from lumiere.paper_trading import PaperTradingConfig, PaperTradingLedger
 from lumiere.risk import RiskConfig, RiskManager
 from lumiere.strategy import MovingAverageCrossoverConfig, MovingAverageCrossoverStrategy
+from tests.fakes import DeterministicFakeExchange
 
 
 def candles(closes: list[str]) -> list[MarketCandle]:
@@ -71,6 +74,29 @@ class CollectingNotifier:
 
     async def send(self, text: str) -> None:
         self.messages.append(text)
+
+
+class BuyOnceStrategy:
+    name = "buy_once"
+
+    class Config:
+        inst_id = "BTC-USDT"
+
+    config = Config()
+
+    def describe(self) -> dict[str, str]:
+        return {"name": self.name, "inst_id": self.config.inst_id}
+
+    def decide(self, candles: list[MarketCandle], account: AccountSnapshot) -> StrategyDecision:
+        if account.position_size(self.config.inst_id) <= 0:
+            return StrategyDecision(
+                DecisionAction.BUY,
+                self.config.inst_id,
+                Decimal("0.001"),
+                "buy_once",
+                {"decision_price": str(candles[-1].close), "expected_edge_bps": "100"},
+            )
+        return StrategyDecision.hold(self.config.inst_id, "already_long")
 
 
 @pytest.mark.asyncio
@@ -145,6 +171,7 @@ async def test_engine_records_paper_decision_against_shadow_portfolio(tmp_path) 
             )
         ),
         risk_manager=RiskManager(RiskConfig(cooldown_seconds=0)),
+        config=EngineConfig(unexpected_position_policy="adopt"),
         paper_ledger=paper,
     )
 
@@ -154,6 +181,147 @@ async def test_engine_records_paper_decision_against_shadow_portfolio(tmp_path) 
     assert [event["type"] for event in paper.events] == ["decision", "portfolio_state"]
     assert paper.events[0]["action"] == "hold"
     assert paper.events[0]["inputs"]["position_base"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_engine_blocks_unexpected_starting_inventory_until_policy_selected() -> None:
+    client = FakeClient(candles(["110", "101", "100"]))
+    client.account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position("BTC-USDT", Decimal("0.002"), Decimal("105")),
+    )
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(fast_window=2, slow_window=3)
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=0)),
+    )
+
+    await engine.tick()
+
+    assert client.orders == []
+    assert engine.status().last_decision == "BTC-USDT:hold"
+    assert engine.status().last_risk_reason == "hold_allowed"
+    assert engine.describe_live_positions()[0]["managed"] is False
+
+
+@pytest.mark.asyncio
+async def test_engine_flatten_policy_sells_unexpected_inventory() -> None:
+    client = FakeClient(candles(["100", "100", "100"]))
+    client.account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position("BTC-USDT", Decimal("0.002"), Decimal("100")),
+    )
+    notifier = CollectingNotifier()
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(fast_window=2, slow_window=3)
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=300)),
+        notifier=notifier,
+        config=EngineConfig(unexpected_position_policy="flatten"),
+    )
+
+    await engine.tick()
+
+    assert [(order.side, order.size_btc) for order in client.orders] == [
+        (DecisionAction.SELL, Decimal("0.002"))
+    ]
+    assert engine.status().last_risk_reason == "protective_exit_allowed"
+    assert "unexpected position flatten" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_live_stop_loss_has_priority_over_stale_exit_and_strategy_signal() -> None:
+    client = FakeClient(candles(["100", "95", "89"]))
+    client.account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position("BTC-USDT", Decimal("0.001"), Decimal("100")),
+    )
+    notifier = CollectingNotifier()
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(fast_window=2, slow_window=3)
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=300)),
+        notifier=notifier,
+        config=EngineConfig(
+            unexpected_position_policy="adopt",
+            stop_loss_bps=Decimal("1000"),
+            max_bars_in_trade=1,
+        ),
+    )
+
+    await engine.tick()
+
+    assert [order.side for order in client.orders] == [DecisionAction.SELL]
+    assert engine.status().last_risk_reason == "protective_exit_allowed"
+    assert "live stop loss" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_live_stale_position_max_age_exits_without_strategy_signal() -> None:
+    market = candles(["100", "100", "100"])
+    client = FakeClient(market)
+    position = Position("BTC-USDT", Decimal("0.001"), Decimal("100"))
+    client.account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=position,
+    )
+    notifier = CollectingNotifier()
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(fast_window=2, slow_window=3)
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=300)),
+        notifier=notifier,
+        config=EngineConfig(max_position_age_seconds=60),
+    )
+    engine.position_store.adopt_unexpected_position(
+        position,
+        current_price=Decimal("100"),
+        now=market[-1].ts - timedelta(minutes=2),
+        strategy_name="moving_average_crossover",
+    )
+
+    await engine.tick()
+
+    assert [(order.side, order.size_btc) for order in client.orders] == [
+        (DecisionAction.SELL, Decimal("0.001"))
+    ]
+    assert "live max age exit" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_live_position_state_uses_reconciled_partial_fill_size(tmp_path) -> None:
+    market = candles(["100"])
+    client = DeterministicFakeExchange(
+        {"BTC-USDT": market},
+        fill_splits_by_order_number={1: (Decimal("0.4"),)},
+    )
+    position_state_path = tmp_path / "positions.json"
+    engine = TradingEngine(
+        client=client,
+        strategy=BuyOnceStrategy(),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=0)),
+        config=EngineConfig(position_state_path=str(position_state_path)),
+    )
+
+    await engine.tick()
+
+    assert [order.size_btc for order in client.orders] == [Decimal("0.001")]
+    descriptions = engine.describe_live_positions()
+    assert descriptions[0]["size_base"] == "0.0004"
+    assert descriptions[0]["account_size_base"] == "0.0004"
+    assert LivePositionStore(position_state_path).describe()[0]["size_base"] == "0.0004"
 
 
 @pytest.mark.asyncio
