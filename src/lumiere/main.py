@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import structlog
 
+from lumiere.attribution import AttributionLedger
 from lumiere.config import Settings
 from lumiere.engine import EngineConfig, TradingEngine
 from lumiere.logging_config import configure_logging
@@ -24,6 +26,7 @@ def build_engine(settings: Settings) -> TradingEngine:
         if settings.risk_require_performance_gate
         else None
     )
+    attribution_ledger = AttributionLedger(Path(settings.attribution_ledger_path))
     return TradingEngine(
         client=client,
         strategy=strategy,
@@ -34,6 +37,7 @@ def build_engine(settings: Settings) -> TradingEngine:
             order_type=settings.okx_order_type,
         ),
         paper_ledger=paper_ledger,
+        attribution_ledger=attribution_ledger,
     )
 
 

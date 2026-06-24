@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     risk_drawdown_derisk_multiplier: Decimal = Decimal("0.5")
     risk_require_performance_gate: bool = False
     paper_ledger_path: str = "data/paper_trading.jsonl"
+    attribution_ledger_path: str = "data/attribution.jsonl"
     performance_gate_min_trades: int = 20
     performance_gate_min_net_pnl_usdt: Decimal = Decimal("0")
     performance_gate_max_drawdown_usdt: Decimal = Decimal("0")

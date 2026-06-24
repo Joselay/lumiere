@@ -8,6 +8,7 @@ from typing import Protocol
 
 import structlog
 
+from lumiere.attribution import AttributionLedger
 from lumiere.models import AccountSnapshot, DecisionAction, OrderRequest, OrderResult
 from lumiere.paper_trading import PaperTradingLedger
 from lumiere.risk import RiskManager
@@ -62,6 +63,7 @@ class TradingEngine:
         notifier: Notifier | None = None,
         config: EngineConfig | None = None,
         paper_ledger: PaperTradingLedger | None = None,
+        attribution_ledger: AttributionLedger | None = None,
     ) -> None:
         self.client = client
         self.strategies = _normalise_strategies(strategy)
@@ -70,6 +72,7 @@ class TradingEngine:
         self.notifier = notifier or NullNotifier()
         self.config = config or EngineConfig()
         self.paper_ledger = paper_ledger
+        self.attribution_ledger = attribution_ledger
         self._paused = False
         self._panic_stopped = False
         self._running = False
@@ -137,7 +140,8 @@ class TradingEngine:
             f"rejected_by_cost_count="
             f"{account.rejected_by_cost_count + self.risk_manager.rejected_by_cost_count} "
             f"performance_gate_passed={account.performance_gate_passed} "
-            f"performance_gate_reason={account.performance_gate_reason}"
+            f"performance_gate_reason={account.performance_gate_reason} "
+            f"attribution={self._attribution_summary()}"
         )
 
     async def risk_text(self) -> str:
@@ -218,12 +222,16 @@ class TradingEngine:
             account = await self.client.fetch_account_snapshot()
             account = self._account_with_paper_gate(account)
             self._last_account = account
+            self._record_attribution_account(account)
             for strategy in self.strategies:
                 candles = await self.client.fetch_candles(strategy.config.inst_id)
+                self._record_attribution_candles(strategy.config.inst_id, candles)
                 decision = strategy.decide(candles, account)
                 self._record_paper_decision(strategy.name, decision, candles)
+                self._record_attribution_decision(strategy.name, decision, candles)
                 self._last_decision = f"{decision.inst_id}:{decision.action.value}"
                 risk_decision = self.risk_manager.assess(decision, account)
+                self._record_attribution_risk(decision, risk_decision, candles)
                 self._last_risk_reason = risk_decision.reason
                 decision_log = log.debug if decision.action is DecisionAction.HOLD else log.info
                 decision_log(
@@ -268,6 +276,7 @@ class TradingEngine:
                     order_type=self.config.order_type,
                 )
                 result = await self.client.place_market_order(order)
+                self._record_attribution_order(order, result, candles)
                 self.risk_manager.record_trade(inst_id=decision.inst_id)
                 self.risk_manager.record_success()
                 log.info(
@@ -305,6 +314,47 @@ class TradingEngine:
         if self.paper_ledger is None or not candles:
             return
         self.paper_ledger.record_decision(decision, candles[-1], strategy_name=strategy_name)
+
+    def _record_attribution_account(self, account: AccountSnapshot) -> None:
+        if self.attribution_ledger is not None:
+            self.attribution_ledger.record_account(account)
+
+    def _record_attribution_candles(self, inst_id: str, candles) -> None:
+        if self.attribution_ledger is None:
+            return
+        for candle in candles[-1:]:
+            self.attribution_ledger.record_candle(inst_id, candle)
+
+    def _record_attribution_decision(self, strategy_name: str, decision, candles) -> None:
+        if self.attribution_ledger is None or not candles:
+            return
+        self.attribution_ledger.record_decision(strategy_name, decision, ts=candles[-1].ts)
+
+    def _record_attribution_risk(self, decision, risk_decision, candles) -> None:
+        if self.attribution_ledger is None or not candles:
+            return
+        self.attribution_ledger.record_risk(
+            decision.inst_id,
+            decision.action.value,
+            risk_decision.allowed,
+            risk_decision.reason,
+            ts=candles[-1].ts,
+        )
+
+    def _record_attribution_order(self, order: OrderRequest, result: OrderResult, candles) -> None:
+        if self.attribution_ledger is None or not candles:
+            return
+        self.attribution_ledger.record_order(order, result, ts=candles[-1].ts)
+
+    def _attribution_summary(self) -> str:
+        if self.attribution_ledger is None:
+            return "disabled"
+        report = self.attribution_ledger.report()
+        metrics = report.metrics
+        return (
+            f"net_pnl_usdt={metrics['net_pnl_usdt']} fees_usdt={metrics['fees_usdt']} "
+            f"profit_factor={metrics['profit_factor']} alerts={','.join(report.alerts) or 'none'}"
+        )
 
 
 def _normalise_strategies(
