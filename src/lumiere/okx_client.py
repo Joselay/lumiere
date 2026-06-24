@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Iterable
-from datetime import UTC, datetime
+from collections.abc import Callable, Iterable
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
 from lumiere.config import Settings
-from lumiere.ledger import realized_pnl_for_period, trade_fill_from_okx_row
+from lumiere.ledger import TradeFill, realized_pnl_for_period, trade_fill_from_okx_row
 from lumiere.models import (
     AccountSnapshot,
     MarketCandle,
@@ -137,39 +138,102 @@ class OKXDemoClient:
             slippages.append(max(buy_slippage, sell_slippage))
         return max(spreads, default=Decimal("0")), max(slippages, default=Decimal("0"))
 
+    async def fetch_order_fills(
+        self,
+        result: OrderResult,
+        *,
+        decision_price: Decimal | None = None,
+        submitted_at: datetime | None = None,
+    ) -> tuple[TradeFill, ...]:
+        """Fetch and reconcile OKX fills for one submitted order."""
+
+        now = datetime.now(tz=UTC)
+        period_start = submitted_at or datetime(now.year, now.month, now.day, tzinfo=UTC)
+        rows = await self._fetch_fill_rows(
+            period_start=period_start - timedelta(minutes=5),
+            period_end=now,
+            order_id=result.order_id,
+        )
+        matched_rows = [row for row in rows if _row_matches_order(row, result)]
+        fills: list[TradeFill] = []
+        for row in matched_rows:
+            fill = trade_fill_from_okx_row(row)
+            latency_ms = None
+            if submitted_at is not None:
+                latency_ms = max(int((fill.ts - submitted_at).total_seconds() * 1000), 0)
+            fills.append(
+                replace(
+                    fill,
+                    decision_price=decision_price,
+                    latency_ms=latency_ms,
+                    client_order_id=str(row.get("clOrdId") or result.client_order_id or ""),
+                    raw=dict(row),
+                )
+            )
+        return tuple(fills)
+
     async def _fetch_fill_rows(
         self,
         *,
         period_start: datetime,
         period_end: datetime,
+        order_id: str | None = None,
     ) -> list[dict[str, Any]]:
         begin = _to_okx_millis(period_start)
         end = _to_okx_millis(period_end)
-        responses: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for inst_id in self.settings.enabled_inst_ids:
-            responses.append(
-                await asyncio.to_thread(
+            rows.extend(
+                await self._fetch_paginated_fill_rows(
                     self._trade.get_fills,
-                    instType="SPOT",
-                    instId=inst_id,
-                    begin=begin,
-                    end=end,
-                    limit="100",
+                    {
+                        "instType": "SPOT",
+                        "instId": inst_id,
+                        "begin": begin,
+                        "end": end,
+                        "ordId": order_id or "",
+                    },
                 )
             )
             if hasattr(self._trade, "get_fills_history"):
-                responses.append(
-                    await asyncio.to_thread(
-                        self._trade.get_fills_history,
-                        "SPOT",
-                        instId=inst_id,
-                        limit="100",
+                rows.extend(
+                    await self._fetch_paginated_fill_rows(
+                        lambda **kwargs: self._trade.get_fills_history("SPOT", **kwargs),
+                        {
+                            "instId": inst_id,
+                            "ordId": order_id or "",
+                        },
                     )
                 )
-        rows: list[dict[str, Any]] = []
-        for response in responses:
-            rows.extend(_require_ok_response(response))
         return _dedupe_fill_rows(rows)
+
+    async def _fetch_paginated_fill_rows(
+        self,
+        fetch_page: Callable[..., dict[str, Any]],
+        base_kwargs: dict[str, str],
+        *,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        before = ""
+        seen_cursors: set[str] = set()
+        for _ in range(max_pages):
+            kwargs = {**base_kwargs, "limit": "100"}
+            if before:
+                kwargs["before"] = before
+            response = await asyncio.to_thread(fetch_page, **kwargs)
+            page = _require_ok_response(response)
+            if not page:
+                break
+            rows.extend(page)
+            if len(page) < 100:
+                break
+            cursor = _fill_cursor(page[-1])
+            if not cursor or cursor in seen_cursors:
+                break
+            seen_cursors.add(cursor)
+            before = cursor
+        return rows
 
     async def place_market_order(self, request: OrderRequest) -> OrderResult:
         self.risk_manager.validate_order(request)
@@ -305,6 +369,25 @@ def _daily_realized_pnl_from_fill_rows(
 
 def _daily_trade_count(rows: list[dict[str, Any]], period_start: datetime) -> int:
     return sum(1 for row in rows if _fill_ts(row) >= period_start)
+
+
+def _row_matches_order(row: dict[str, Any], result: OrderResult) -> bool:
+    row_order_id = str(row.get("ordId") or "")
+    row_client_id = str(row.get("clOrdId") or "")
+    return bool(
+        (result.order_id and row_order_id == result.order_id)
+        or (result.client_order_id and row_client_id == result.client_order_id)
+    )
+
+
+def _fill_cursor(row: dict[str, Any]) -> str:
+    return str(
+        row.get("tradeId")
+        or row.get("execId")
+        or row.get("billId")
+        or row.get("ts")
+        or ""
+    )
 
 
 def _dedupe_fill_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

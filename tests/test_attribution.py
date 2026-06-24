@@ -36,6 +36,45 @@ def test_attribution_ledger_persists_across_restarts(tmp_path) -> None:
     assert restarted.events[0]["type"] == "account"
 
 
+def test_attribution_report_dedupes_fills_and_flags_missing_order_attribution(tmp_path) -> None:
+    path = tmp_path / "attribution.jsonl"
+    ledger = AttributionLedger(path)
+    ts = datetime(2026, 1, 1, tzinfo=UTC)
+    order = OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("1"))
+    result = OrderResult("ord-1", "client-1", "BTC-USDT", DecisionAction.BUY, Decimal("1"), "OK")
+    ledger.record_order(order, result, ts=ts)
+    for _ in range(2):
+        ledger.record_fill(
+            inst_id="BTC-USDT",
+            side=DecisionAction.BUY,
+            size_base=Decimal("1"),
+            price=Decimal("101"),
+            fee=Decimal("1"),
+            ts=ts + timedelta(seconds=1),
+            decision_price=Decimal("100"),
+            order_id="ord-1",
+            trade_id="trade-1",
+            client_order_id="client-1",
+        )
+    ledger.record_order(
+        OrderRequest("BTC-USDT", DecisionAction.SELL, Decimal("1")),
+        OrderResult("ord-2", "client-2", "BTC-USDT", DecisionAction.SELL, Decimal("1"), "OK"),
+        ts=ts + timedelta(minutes=1),
+    )
+
+    report = ledger.report(window=timedelta(days=1), now=ts + timedelta(hours=1))
+
+    assert report.metrics["trade_count"] == 1
+    assert report.metrics["fees_usdt"] == "1"
+    assert report.metrics["average_slippage_bps"] == "100.00"
+    assert report.metrics["fill_completeness"] == {
+        "orders": 2,
+        "orders_without_final_attribution": 1,
+        "filled_orders_without_fills": 0,
+    }
+    assert "orders_missing_final_attribution" in report.alerts
+
+
 def test_attribution_report_explains_pnl_and_rejections(tmp_path) -> None:
     path = tmp_path / "attribution.jsonl"
     ledger = AttributionLedger(path)

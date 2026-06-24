@@ -161,7 +161,10 @@ class AttributionLedger:
         now = now or datetime.now(tz=UTC)
         start = now - window
         events = [event for event in self._events if _parse_datetime(event["ts"]) >= start]
-        fills = [_fill_from_event(event) for event in events if event.get("type") == "fill"]
+        fill_events = _dedupe_fill_events(
+            [event for event in events if event.get("type") == "fill"]
+        )
+        fills = [_fill_from_event(event) for event in fill_events]
         marks = _latest_mark_prices(events)
         metrics = build_pnl_metrics(
             fills,
@@ -173,13 +176,21 @@ class AttributionLedger:
             if event.get("type") == "risk" and not event.get("allowed"):
                 reason = str(event.get("reason") or "unknown")
                 rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
-        slippages = _slippage_bps(events)
+        slippages = _slippage_bps(fill_events)
+        order_completeness = _order_completeness(events, fill_events)
         alerts = _alerts(metrics.to_dict(), rejection_counts, slippages, events)
+        if order_completeness["orders_without_final_attribution"]:
+            alerts.append("orders_missing_final_attribution")
+        if order_completeness["filled_orders_without_fills"]:
+            alerts.append("orders_missing_fill_attribution")
         payload = metrics.to_dict()
+        average_slippage = None if not slippages else sum(slippages) / len(slippages)
         payload["average_slippage_bps"] = (
-            None if not slippages else str(sum(slippages) / len(slippages))
+            None if average_slippage is None else str(average_slippage)
         )
+        payload["realized_slippage_bps"] = payload["average_slippage_bps"]
         payload["risk_rejections"] = rejection_counts
+        payload["fill_completeness"] = order_completeness
         payload["baseline_comparison"] = {"no_trade_pnl_usdt": "0"}
         return AttributionReport(start, now, payload, rejection_counts, tuple(alerts))
 
@@ -188,6 +199,28 @@ def _load_events(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def _dedupe_fill_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str, str]] = set()
+    for index, event in enumerate(events):
+        trade_id = str(event.get("trade_id") or "")
+        order_id = str(event.get("order_id") or "")
+        client_order_id = str(event.get("client_order_id") or "")
+        unique_fill_id = trade_id or order_id or client_order_id or f"event-{index}"
+        key = (
+            unique_fill_id,
+            str(event.get("inst_id") or ""),
+            str(event.get("ts") or ""),
+            str(event.get("side") or ""),
+            str(event.get("size_base") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(event)
+    return deduped
 
 
 def _fill_from_event(event: dict[str, Any]) -> TradeFill:
@@ -232,6 +265,71 @@ def _slippage_bps(events: list[dict[str, Any]]) -> list[Decimal]:
         if decision_price > 0:
             values.append(abs(fill_price - decision_price) / decision_price * Decimal("10000"))
     return values
+
+
+def _fill_identity(event: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    unique_fill_id = (
+        str(event.get("trade_id") or "")
+        or str(event.get("order_id") or "")
+        or str(event.get("client_order_id") or "")
+        or str(event.get("ts") or "")
+    )
+    return (
+        unique_fill_id,
+        str(event.get("inst_id") or ""),
+        str(event.get("ts") or ""),
+        str(event.get("side") or ""),
+        str(event.get("size_base") or ""),
+    )
+
+
+def _order_completeness(
+    events: list[dict[str, Any]],
+    fill_events: list[dict[str, Any]],
+) -> dict[str, int]:
+    fills_by_order: dict[str, list[dict[str, Any]]] = {}
+    fills_by_client_order: dict[str, list[dict[str, Any]]] = {}
+    for event in fill_events:
+        order_id = str(event.get("order_id") or "")
+        client_order_id = str(event.get("client_order_id") or "")
+        if order_id:
+            fills_by_order.setdefault(order_id, []).append(event)
+        if client_order_id:
+            fills_by_client_order.setdefault(client_order_id, []).append(event)
+
+    missing_final = 0
+    missing_fills = 0
+    orders = [event for event in events if event.get("type") == "order"]
+    for order in orders:
+        status = str(order.get("status") or "").lower()
+        order_id = str(order.get("order_id") or "")
+        client_order_id = str(order.get("client_order_id") or "")
+        fills_by_key = {
+            _fill_identity(fill): fill
+            for fill in [
+                *fills_by_order.get(order_id, []),
+                *fills_by_client_order.get(client_order_id, []),
+            ]
+        }
+        fills = list(fills_by_key.values())
+        filled_size = sum(
+            (Decimal(str(fill.get("size_base") or "0")) for fill in fills),
+            Decimal("0"),
+        )
+        order_size = Decimal(str(order.get("size_base") or "0"))
+        complete_by_fills = order_size > 0 and filled_size >= order_size
+        if status in {"filled", "fully_filled"} and not fills:
+            missing_fills += 1
+        if (
+            status not in {"canceled", "cancelled", "rejected", "failed"}
+            and not complete_by_fills
+        ):
+            missing_final += 1
+    return {
+        "orders": len(orders),
+        "orders_without_final_attribution": missing_final,
+        "filled_orders_without_fills": missing_fills,
+    }
 
 
 def _alerts(

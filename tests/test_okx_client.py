@@ -176,6 +176,78 @@ def make_demo_client(fake_trade: FakeTradeAPI) -> OKXDemoClient:
 
 
 @pytest.mark.asyncio
+async def test_fetch_order_fills_matches_order_and_dedupes_history_rows() -> None:
+    fake_trade = FakeTradeAPI()
+    client = make_demo_client(fake_trade)
+    submitted_at = datetime.now(tz=UTC)
+    result = await client.place_market_order(
+        OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("0.001"))
+    )
+
+    fills = await client.fetch_order_fills(
+        result,
+        decision_price=Decimal("99"),
+        submitted_at=submitted_at,
+    )
+
+    assert len(fills) == 1
+    assert fills[0].order_id == "ord-1"
+    assert fills[0].trade_id == "fill-1"
+    assert fills[0].decision_price == Decimal("99")
+    assert fills[0].latency_ms is not None
+    assert fills[0].raw["ordId"] == "ord-1"
+
+
+@pytest.mark.asyncio
+async def test_fill_history_paginates_beyond_single_hundred_row_window() -> None:
+    class PaginatedTradeAPI(FakeTradeAPI):
+        def __init__(self) -> None:
+            super().__init__()
+            start = datetime(2026, 1, 1, tzinfo=UTC)
+            self.rows = [
+                {
+                    "instId": "BTC-USDT",
+                    "side": "buy",
+                    "fillSz": "0.001",
+                    "fillPx": "100",
+                    "fee": "0",
+                    "feeCcy": "USDT",
+                    "ts": str(int((start + timedelta(seconds=i)).timestamp() * 1000)),
+                    "tradeId": f"fill-{i:03d}",
+                    "ordId": f"ord-{i:03d}",
+                }
+                for i in range(150)
+            ]
+            self.calls: list[dict[str, str]] = []
+
+        def get_fills(self, **kwargs):
+            self.calls.append(kwargs)
+            before = kwargs.get("before")
+            if not before:
+                page = self.rows[:100]
+            else:
+                index = next(i for i, row in enumerate(self.rows) if row["tradeId"] == before)
+                page = self.rows[index + 1 : index + 101]
+            return {"code": "0", "data": page}
+
+        def get_fills_history(self, *args, **kwargs):
+            _ = args, kwargs
+            return {"code": "0", "data": []}
+
+    fake_trade = PaginatedTradeAPI()
+    client = make_demo_client(fake_trade)
+
+    rows = await client._fetch_fill_rows(  # noqa: SLF001 - verifies pagination helper behavior
+        period_start=datetime(2026, 1, 1, tzinfo=UTC),
+        period_end=datetime(2026, 1, 2, tzinfo=UTC),
+    )
+
+    assert len(rows) == 150
+    assert len(fake_trade.calls) == 2
+    assert fake_trade.calls[1]["before"] == "fill-099"
+
+
+@pytest.mark.asyncio
 async def test_place_market_buy_order_requests_base_currency_size() -> None:
     fake_trade = FakeTradeAPI()
     client = make_demo_client(fake_trade)
