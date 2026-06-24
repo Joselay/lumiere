@@ -10,6 +10,7 @@ from lumiere.models import DecisionAction, OrderRequest
 from lumiere.okx_client import (
     OKXDemoClient,
     _daily_realized_pnl_from_fill_rows,
+    _depth_slippage_bps_from_orderbook,
     _parse_account_balances,
     _parse_btc_position,
     _spread_bps_from_orderbook,
@@ -58,6 +59,19 @@ def test_spread_bps_from_orderbook_uses_best_bid_and_ask() -> None:
     )
 
     assert spread == Decimal("200")
+
+
+def test_depth_slippage_uses_orderbook_levels_for_executable_size() -> None:
+    data = [
+        {
+            "bids": [["99", "1"], ["98", "2"]],
+            "asks": [["101", "1"], ["103", "2"]],
+        }
+    ]
+
+    slippage = _depth_slippage_bps_from_orderbook(data, Decimal("2"), side="buy")
+
+    assert slippage > Decimal("100")
 
 
 def test_daily_realized_pnl_is_derived_from_okx_fill_rows_after_fees() -> None:

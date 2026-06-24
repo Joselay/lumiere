@@ -80,6 +80,7 @@ class RsiMeanReversionStrategy:
             "allowed_regimes": self.allowed_regimes,
             "regime": "ranging" if rsi <= self.config.oversold_rsi else "neutral",
             "spread_liquidity_ok": spread_ok,
+            "expected_edge_bps": str(abs(rsi - Decimal("50")) * Decimal("10")),
         }
         if not spread_ok:
             return StrategyDecision.hold(self.config.inst_id, "spread_liquidity_not_ok", inputs)

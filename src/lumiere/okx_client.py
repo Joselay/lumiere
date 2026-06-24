@@ -86,8 +86,11 @@ class OKXDemoClient:
         )
         daily_realized_pnl, daily_trade_count = await self.fetch_daily_realized_pnl()
         spread_bps = None
+        estimated_slippage_bps = None
+        estimated_total_cost_bps = None
         if self.risk_manager.config.max_spread_bps is not None:
-            spread_bps = await self.fetch_max_spread_bps()
+            spread_bps, estimated_slippage_bps = await self.fetch_execution_quality_bps()
+            estimated_total_cost_bps = spread_bps + estimated_slippage_bps + Decimal("10")
         return AccountSnapshot(
             equity_usdt=equity,
             available_usdt=available,
@@ -95,6 +98,8 @@ class OKXDemoClient:
             daily_realized_pnl_usdt=daily_realized_pnl,
             daily_trade_count=daily_trade_count,
             spread_bps=spread_bps,
+            estimated_slippage_bps=estimated_slippage_bps,
+            estimated_total_cost_bps=estimated_total_cost_bps,
         )
 
     async def fetch_daily_realized_pnl(
@@ -112,15 +117,25 @@ class OKXDemoClient:
         )
 
     async def fetch_max_spread_bps(self) -> Decimal:
+        spread, _ = await self.fetch_execution_quality_bps()
+        return spread
+
+    async def fetch_execution_quality_bps(self) -> tuple[Decimal, Decimal]:
         spreads: list[Decimal] = []
+        slippages: list[Decimal] = []
         for inst_id in self.settings.enabled_inst_ids:
             response = await asyncio.to_thread(
                 self._market.get_orderbook,
                 instId=inst_id,
-                sz="1",
+                sz="50",
             )
-            spreads.append(_spread_bps_from_orderbook(_require_ok_response(response)))
-        return max(spreads, default=Decimal("0"))
+            data = _require_ok_response(response)
+            trade_size = self.settings._trade_size_for(inst_id)  # noqa: SLF001 - config-owned sizing
+            spreads.append(_spread_bps_from_orderbook(data))
+            buy_slippage = _depth_slippage_bps_from_orderbook(data, trade_size, side="buy")
+            sell_slippage = _depth_slippage_bps_from_orderbook(data, trade_size, side="sell")
+            slippages.append(max(buy_slippage, sell_slippage))
+        return max(spreads, default=Decimal("0")), max(slippages, default=Decimal("0"))
 
     async def _fetch_fill_rows(
         self,
@@ -168,6 +183,8 @@ class OKXDemoClient:
             "clOrdId": client_order_id,
             "tag": self.settings.okx_order_tag,
         }
+        if request.limit_price is not None:
+            order_kwargs["px"] = str(request.limit_price)
         if request.side.value == "buy" and request.order_type == "market":
             # OKX interprets spot market-buy sz as quote currency by default. Lumiere's
             # strategy/risk sizes are base units, so make that explicit for buys.
@@ -223,6 +240,45 @@ def _spread_bps_from_orderbook(data: list[Any]) -> Decimal:
     if midpoint <= 0:
         raise OKXAPIError(f"OKX orderbook midpoint is invalid: {_safe_response_repr(orderbook)}")
     return (best_ask - best_bid) / midpoint * Decimal("10000")
+
+
+def _depth_slippage_bps_from_orderbook(
+    data: list[Any],
+    size_base: Decimal,
+    *,
+    side: str,
+) -> Decimal:
+    if not data or size_base <= 0:
+        return Decimal("0")
+    orderbook = data[0]
+    bids = orderbook.get("bids") or []
+    asks = orderbook.get("asks") or []
+    if not bids or not asks:
+        raise OKXAPIError(f"OKX orderbook missing depth: {_safe_response_repr(orderbook)}")
+    best_bid = Decimal(str(bids[0][0]))
+    best_ask = Decimal(str(asks[0][0]))
+    midpoint = (best_bid + best_ask) / Decimal("2")
+    if midpoint <= 0:
+        raise OKXAPIError(f"OKX orderbook midpoint is invalid: {_safe_response_repr(orderbook)}")
+    levels = asks if side == "buy" else bids
+    remaining = size_base
+    notional = Decimal("0")
+    filled = Decimal("0")
+    for level in levels:
+        price = Decimal(str(level[0]))
+        available = Decimal(str(level[1]))
+        take = min(remaining, available)
+        notional += take * price
+        filled += take
+        remaining -= take
+        if remaining <= 0:
+            break
+    if filled <= 0:
+        return Decimal("Infinity")
+    vwap = notional / filled
+    if side == "buy":
+        return max((vwap - midpoint) / midpoint * Decimal("10000"), Decimal("0"))
+    return max((midpoint - vwap) / midpoint * Decimal("10000"), Decimal("0"))
 
 
 def _daily_realized_pnl_from_fill_rows(

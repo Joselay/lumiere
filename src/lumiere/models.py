@@ -45,6 +45,11 @@ class AccountSnapshot:
     daily_trade_count: int = 0
     max_drawdown_usdt: Decimal = Decimal("0")
     spread_bps: Decimal | None = None
+    estimated_slippage_bps: Decimal | None = None
+    estimated_total_cost_bps: Decimal | None = None
+    expected_edge_bps: Decimal | None = None
+    rejected_by_cost_count: int = 0
+    realized_slippage_bps: Decimal | None = None
     performance_gate_passed: bool = False
     performance_gate_reason: str = "not_evaluated"
 
@@ -111,6 +116,7 @@ class OrderRequest:
     size_btc: Decimal
     td_mode: str = "cash"
     order_type: str = "market"
+    limit_price: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

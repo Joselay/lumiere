@@ -97,6 +97,7 @@ class VolatilityBreakoutStrategy:
             "allowed_regimes": self.allowed_regimes,
             "regime": "trending_high_volatility" if volatility_ok else "low_volatility",
             "spread_liquidity_ok": spread_ok,
+            "expected_edge_bps": str(atr_pct * Decimal("10000")),
         }
         if not spread_ok:
             return StrategyDecision.hold(self.config.inst_id, "spread_liquidity_not_ok", inputs)

@@ -39,6 +39,7 @@ class NullNotifier:
 class EngineConfig:
     poll_interval_seconds: float = 30.0
     td_mode: str = "cash"
+    order_type: str = "market"
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,11 @@ class TradingEngine:
             f"max_drawdown_usdt={account.max_drawdown_usdt} "
             f"daily_trade_count={account.daily_trade_count} "
             f"spread_bps={account.spread_bps} "
+            f"estimated_slippage_bps={account.estimated_slippage_bps} "
+            f"estimated_total_cost_bps={account.estimated_total_cost_bps} "
+            f"realized_slippage_bps={account.realized_slippage_bps} "
+            f"rejected_by_cost_count="
+            f"{account.rejected_by_cost_count + self.risk_manager.rejected_by_cost_count} "
             f"performance_gate_passed={account.performance_gate_passed} "
             f"performance_gate_reason={account.performance_gate_reason}"
         )
@@ -230,6 +236,8 @@ class TradingEngine:
                     position_base=decision.inputs.get("position_base"),
                     risk_allowed=risk_decision.allowed,
                     risk_reason=risk_decision.reason,
+                    expected_edge_bps=decision.inputs.get("expected_edge_bps"),
+                    estimated_total_cost_bps=account.estimated_total_cost_bps,
                 )
 
                 if not risk_decision.allowed:
@@ -239,6 +247,8 @@ class TradingEngine:
                         action=decision.action.value,
                         reason=decision.reason,
                         risk_reason=risk_decision.reason,
+                        expected_edge_bps=decision.inputs.get("expected_edge_bps"),
+                        estimated_total_cost_bps=account.estimated_total_cost_bps,
                     )
                     await self.notifier.send(
                         f"Risk blocked {decision.inst_id} {decision.action.value}: "
@@ -254,6 +264,7 @@ class TradingEngine:
                     side=decision.action,
                     size_btc=decision.size_btc,
                     td_mode=self.config.td_mode,
+                    order_type=self.config.order_type,
                 )
                 result = await self.client.place_market_order(order)
                 self.risk_manager.record_trade(inst_id=decision.inst_id)

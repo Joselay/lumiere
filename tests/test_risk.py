@@ -160,6 +160,25 @@ def test_risk_blocks_drawdown_daily_trade_limit_and_spread_guard() -> None:
     )
 
 
+def test_risk_blocks_when_expected_edge_is_below_estimated_cost() -> None:
+    risk = RiskManager(RiskConfig(min_expected_edge_buffer_bps=Decimal("1")))
+    low_edge = buy()
+    low_edge.inputs["expected_edge_bps"] = "5"
+
+    decision = risk.assess(
+        low_edge,
+        AccountSnapshot(
+            equity_usdt=Decimal("1000"),
+            available_usdt=Decimal("1000"),
+            estimated_total_cost_bps=Decimal("5"),
+        ),
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "expected_edge_below_cost"
+    assert risk.rejected_by_cost_count == 1
+
+
 def test_risk_requires_performance_gate_when_configured() -> None:
     risk = RiskManager(RiskConfig(performance_gate_required=True))
 

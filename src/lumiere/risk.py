@@ -22,6 +22,7 @@ class RiskConfig:
     max_drawdown_usdt: Decimal | None = None
     max_daily_trades: int | None = None
     max_spread_bps: Decimal | None = None
+    min_expected_edge_buffer_bps: Decimal = Decimal("0")
     performance_gate_required: bool = False
 
     def __post_init__(self) -> None:
@@ -47,6 +48,8 @@ class RiskConfig:
             raise ValueError("max_daily_trades must be positive when configured")
         if self.max_spread_bps is not None and self.max_spread_bps <= 0:
             raise ValueError("max_spread_bps must be positive when configured")
+        if self.min_expected_edge_buffer_bps < 0:
+            raise ValueError("min_expected_edge_buffer_bps cannot be negative")
         for inst_id, value in (self.max_position_by_inst_id or {}).items():
             if inst_id not in self.allowed_inst_ids:
                 raise ValueError(f"max position configured for disallowed instrument: {inst_id}")
@@ -80,10 +83,15 @@ class RiskManager:
         self.config = config
         self._last_trade_at_by_inst_id: dict[str, datetime] = {}
         self._consecutive_failures = 0
+        self._rejected_by_cost_count = 0
 
     @property
     def consecutive_failures(self) -> int:
         return self._consecutive_failures
+
+    @property
+    def rejected_by_cost_count(self) -> int:
+        return self._rejected_by_cost_count
 
     @property
     def stopped_by_failures(self) -> bool:
@@ -132,6 +140,17 @@ class RiskManager:
                 return RiskDecision(False, "spread_unavailable")
             if account.spread_bps > self.config.max_spread_bps:
                 return RiskDecision(False, "spread_too_wide")
+        edge_decision = _expected_edge_bps(decision.inputs)
+        expected_edge_bps = (
+            edge_decision if edge_decision is not None else account.expected_edge_bps
+        )
+        if expected_edge_bps is not None and account.estimated_total_cost_bps is not None:
+            required_edge = (
+                account.estimated_total_cost_bps + self.config.min_expected_edge_buffer_bps
+            )
+            if expected_edge_bps <= required_edge:
+                self._rejected_by_cost_count += 1
+                return RiskDecision(False, "expected_edge_below_cost")
         if decision.size_btc < self.config.min_order_for(decision.inst_id):
             return RiskDecision(False, "order_size_below_minimum")
         last_trade_at = self._last_trade_at_by_inst_id.get(
@@ -161,3 +180,10 @@ class RiskManager:
             raise ValueError("order size must be positive")
         if order.size_btc < self.config.min_order_for(order.inst_id):
             raise ValueError("order size below minimum")
+
+
+def _expected_edge_bps(inputs: Mapping[str, object]) -> Decimal | None:
+    raw = inputs.get("expected_edge_bps")
+    if raw in {None, ""}:
+        return None
+    return Decimal(str(raw))

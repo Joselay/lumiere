@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     okx_inst_id: str = "BTC-USDT"
     okx_inst_ids: str = ""
     okx_td_mode: str = "cash"
+    okx_order_type: str = "market"
     okx_order_tag: str = "lumieredemo"
 
     telegram_bot_token: str = Field(min_length=1)
@@ -69,6 +70,7 @@ class Settings(BaseSettings):
     risk_max_drawdown_usdt: Decimal = Decimal("0")
     risk_max_daily_trades: int = 0
     risk_max_spread_bps: Decimal = Decimal("0")
+    risk_min_expected_edge_buffer_bps: Decimal = Decimal("0")
     risk_require_performance_gate: bool = False
     paper_ledger_path: str = "data/paper_trading.jsonl"
     performance_gate_min_trades: int = 20
@@ -197,6 +199,7 @@ class Settings(BaseSettings):
             max_drawdown_usdt=_positive_decimal_or_none(self.risk_max_drawdown_usdt),
             max_daily_trades=self.risk_max_daily_trades if self.risk_max_daily_trades > 0 else None,
             max_spread_bps=_positive_decimal_or_none(self.risk_max_spread_bps),
+            min_expected_edge_buffer_bps=self.risk_min_expected_edge_buffer_bps,
             performance_gate_required=self.risk_require_performance_gate,
         )
 
