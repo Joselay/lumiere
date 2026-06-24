@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from functools import cached_property
+from pathlib import Path
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lumiere.backtest import CostModel
+from lumiere.paper_gate import PerformanceGateConfig
+from lumiere.paper_trading import PaperTradingConfig
 from lumiere.risk import RiskConfig
 from lumiere.strategy import MovingAverageCrossoverConfig, TradingStrategy
 from lumiere.strategy_factory import STRATEGY_NAMES, build_strategy
@@ -65,6 +70,12 @@ class Settings(BaseSettings):
     risk_max_daily_trades: int = 0
     risk_max_spread_bps: Decimal = Decimal("0")
     risk_require_performance_gate: bool = False
+    paper_ledger_path: str = "data/paper_trading.jsonl"
+    performance_gate_min_trades: int = 20
+    performance_gate_min_net_pnl_usdt: Decimal = Decimal("0")
+    performance_gate_max_drawdown_usdt: Decimal = Decimal("0")
+    performance_gate_min_profit_factor: Decimal = Decimal("1")
+    performance_gate_max_evidence_age_hours: int = 168
 
     @field_validator("okx_flag")
     @classmethod
@@ -149,6 +160,23 @@ class Settings(BaseSettings):
                 breakout_min_atr_pct=self.strategy_breakout_min_atr_pct,
             )
             for inst_id in self.enabled_inst_ids
+        )
+
+    def paper_trading_config(self) -> PaperTradingConfig:
+        return PaperTradingConfig(
+            path=Path(self.paper_ledger_path),
+            cost_model=CostModel(),
+            gate=PerformanceGateConfig(
+                min_trades=self.performance_gate_min_trades,
+                min_net_pnl_usdt=self.performance_gate_min_net_pnl_usdt,
+                max_drawdown_usdt=_positive_decimal_or_none(
+                    self.performance_gate_max_drawdown_usdt
+                ),
+                min_profit_factor=_positive_decimal_or_none(
+                    self.performance_gate_min_profit_factor
+                ),
+            ),
+            max_evidence_age=timedelta(hours=self.performance_gate_max_evidence_age_hours),
         )
 
     def risk_config(self) -> RiskConfig:

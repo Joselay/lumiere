@@ -46,6 +46,7 @@ class AccountSnapshot:
     max_drawdown_usdt: Decimal = Decimal("0")
     spread_bps: Decimal | None = None
     performance_gate_passed: bool = False
+    performance_gate_reason: str = "not_evaluated"
 
     def __post_init__(self) -> None:
         positions = tuple(self.positions)

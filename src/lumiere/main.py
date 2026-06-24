@@ -8,6 +8,7 @@ from lumiere.config import Settings
 from lumiere.engine import EngineConfig, TradingEngine
 from lumiere.logging_config import configure_logging
 from lumiere.okx_client import OKXDemoClient
+from lumiere.paper_trading import PaperTradingLedger
 from lumiere.risk import RiskManager
 from lumiere.telegram_bot import run_bot
 
@@ -18,6 +19,11 @@ def build_engine(settings: Settings) -> TradingEngine:
     risk_manager = RiskManager(settings.risk_config())
     strategy = settings.strategies()
     client = OKXDemoClient(settings, risk_manager)
+    paper_ledger = (
+        PaperTradingLedger(settings.paper_trading_config())
+        if settings.risk_require_performance_gate
+        else None
+    )
     return TradingEngine(
         client=client,
         strategy=strategy,
@@ -26,6 +32,7 @@ def build_engine(settings: Settings) -> TradingEngine:
             poll_interval_seconds=settings.engine_poll_interval_seconds,
             td_mode=settings.okx_td_mode,
         ),
+        paper_ledger=paper_ledger,
     )
 
 

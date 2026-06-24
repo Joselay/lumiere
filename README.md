@@ -20,7 +20,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 | Strategy | Config-selectable moving-average crossover, RSI mean-reversion, and ATR volatility-breakout strategies |
 | Orders | OKX market buy/sell orders through `python-okx` |
 | Telegram | `/start`, `/status`, `/strategy`, `/performance`, `/risk`, `/pause`, `/resume`, `/panic` |
-| Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, performance gate, max consecutive failures |
+| Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, persistent rolling paper/live performance gate, max consecutive failures |
 | Profitability evidence | OKX SDK historical candle backtests with fees, spread, slippage, rejected-order modeling, PnL ledger metrics, and buy-and-hold/no-trade baselines |
 | Observability | Pretty structured logs with configurable `LOG_LEVEL` |
 
@@ -33,6 +33,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 - Cancels open orders during panic stop.
 - Keeps strategy and risk logic covered by tests so future changes are easier to make safely.
 - Supports config-selected strategy modules via `STRATEGY_NAME=moving_average_crossover`, `rsi_mean_reversion`, or `volatility_breakout`; backtest reports include each strategy's allowed market regimes.
+- Can require a persistent rolling paper-trading performance gate before live/demo orders are allowed (`RISK_REQUIRE_PERFORMANCE_GATE=true`).
 
 ## Profitability and safety disclaimer
 

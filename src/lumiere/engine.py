@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 import structlog
 
 from lumiere.models import AccountSnapshot, DecisionAction, OrderRequest, OrderResult
+from lumiere.paper_trading import PaperTradingLedger
 from lumiere.risk import RiskManager
 from lumiere.strategy import TradingStrategy
 
@@ -59,6 +60,7 @@ class TradingEngine:
         risk_manager: RiskManager,
         notifier: Notifier | None = None,
         config: EngineConfig | None = None,
+        paper_ledger: PaperTradingLedger | None = None,
     ) -> None:
         self.client = client
         self.strategies = _normalise_strategies(strategy)
@@ -66,6 +68,7 @@ class TradingEngine:
         self.risk_manager = risk_manager
         self.notifier = notifier or NullNotifier()
         self.config = config or EngineConfig()
+        self.paper_ledger = paper_ledger
         self._paused = False
         self._panic_stopped = False
         self._running = False
@@ -114,7 +117,9 @@ class TradingEngine:
             f"daily_pnl_usdt={account.daily_realized_pnl_usdt} "
             f"drawdown_usdt={account.max_drawdown_usdt} "
             f"daily_trades={account.daily_trade_count} "
-            f"gate_passed={account.performance_gate_passed} failures={status.consecutive_failures} "
+            f"gate_passed={account.performance_gate_passed} "
+            f"gate_reason={account.performance_gate_reason} "
+            f"failures={status.consecutive_failures} "
             f"last_decision={status.last_decision} last_risk={status.last_risk_reason}"
         )
 
@@ -125,7 +130,8 @@ class TradingEngine:
             f"max_drawdown_usdt={account.max_drawdown_usdt} "
             f"daily_trade_count={account.daily_trade_count} "
             f"spread_bps={account.spread_bps} "
-            f"performance_gate_passed={account.performance_gate_passed}"
+            f"performance_gate_passed={account.performance_gate_passed} "
+            f"performance_gate_reason={account.performance_gate_reason}"
         )
 
     async def risk_text(self) -> str:
@@ -139,13 +145,15 @@ class TradingEngine:
             f"daily_trades={account.daily_trade_count}/{config.max_daily_trades} "
             f"spread_bps={account.spread_bps}/{config.max_spread_bps} "
             f"performance_gate_required={config.performance_gate_required} "
-            f"performance_gate={gate_state} failures={self.risk_manager.consecutive_failures}"
+            f"performance_gate={gate_state} gate_reason={account.performance_gate_reason} "
+            f"failures={self.risk_manager.consecutive_failures}"
         )
 
     async def _account_for_report(self) -> AccountSnapshot:
         account = self._last_account
         if account is None:
             account = await self.client.fetch_account_snapshot()
+            account = self._account_with_paper_gate(account)
             self._last_account = account
         return account
 
@@ -202,10 +210,12 @@ class TradingEngine:
             return
         try:
             account = await self.client.fetch_account_snapshot()
+            account = self._account_with_paper_gate(account)
             self._last_account = account
             for strategy in self.strategies:
                 candles = await self.client.fetch_candles(strategy.config.inst_id)
                 decision = strategy.decide(candles, account)
+                self._record_paper_decision(strategy.name, decision, candles)
                 self._last_decision = f"{decision.inst_id}:{decision.action.value}"
                 risk_decision = self.risk_manager.assess(decision, account)
                 self._last_risk_reason = risk_decision.reason
@@ -268,6 +278,21 @@ class TradingEngine:
             if self.risk_manager.stopped_by_failures:
                 self._paused = True
                 await self.notifier.send("Trading paused: max consecutive failures reached")
+
+    def _account_with_paper_gate(self, account: AccountSnapshot) -> AccountSnapshot:
+        if self.paper_ledger is None:
+            return account
+        gate = self.paper_ledger.gate_decision()
+        return replace(
+            account,
+            performance_gate_passed=gate.allowed,
+            performance_gate_reason=gate.reason,
+        )
+
+    def _record_paper_decision(self, strategy_name: str, decision, candles) -> None:
+        if self.paper_ledger is None or not candles:
+            return
+        self.paper_ledger.record_decision(decision, candles[-1], strategy_name=strategy_name)
 
 
 def _normalise_strategies(
