@@ -19,6 +19,7 @@ from lumiere.models import (
     Position,
 )
 from lumiere.risk import RiskManager
+from lumiere.risk_state import RiskStateStore
 
 
 class OKXAPIError(RuntimeError):
@@ -35,6 +36,9 @@ class OKXDemoClient:
             )
         self.settings = settings
         self.risk_manager = risk_manager
+        self._risk_state_store = (
+            RiskStateStore(settings.risk_state_path) if settings.risk_state_path.strip() else None
+        )
 
         # Import here so pure strategy/risk tests do not need the SDK installed.
         from okx import Account, MarketData, Trade  # type: ignore[import-not-found]
@@ -92,15 +96,20 @@ class OKXDemoClient:
         spread_bps = None
         estimated_slippage_bps = None
         estimated_total_cost_bps = None
-        if self.risk_manager.config.max_spread_bps is not None:
+        if self.risk_manager.config.requires_execution_quality:
             spread_bps, estimated_slippage_bps = await self.fetch_execution_quality_bps()
             estimated_total_cost_bps = spread_bps + estimated_slippage_bps + Decimal("10")
+        risk_state_store = getattr(self, "_risk_state_store", None)
+        max_drawdown_usdt = Decimal("0")
+        if risk_state_store is not None:
+            max_drawdown_usdt = risk_state_store.update(equity).max_drawdown_usdt
         return AccountSnapshot(
             equity_usdt=equity,
             available_usdt=available,
             positions=positions,
             daily_realized_pnl_usdt=daily_realized_pnl,
             daily_trade_count=daily_trade_count,
+            max_drawdown_usdt=max_drawdown_usdt,
             spread_bps=spread_bps,
             estimated_slippage_bps=estimated_slippage_bps,
             estimated_total_cost_bps=estimated_total_cost_bps,

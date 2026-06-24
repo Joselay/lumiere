@@ -66,3 +66,19 @@ def test_settings_maps_optional_profitability_risk_controls() -> None:
     assert risk.max_daily_trades == 10
     assert risk.max_spread_bps == Decimal("8")
     assert risk.performance_gate_required is True
+
+
+def test_percentage_settings_accept_safe_human_env_units() -> None:
+    settings = make_settings(
+        risk_max_risk_per_trade_pct="1",
+        risk_max_portfolio_exposure_pct="100%",
+    )
+    risk = settings.risk_config()
+
+    assert risk.max_risk_per_trade_pct == Decimal("0.01")
+    assert risk.max_portfolio_exposure_pct == Decimal("1")
+
+
+def test_percentage_settings_reject_impossible_human_percentages() -> None:
+    with pytest.raises(ValueError, match="cannot exceed 100%"):
+        make_settings(risk_max_portfolio_exposure_pct="150")

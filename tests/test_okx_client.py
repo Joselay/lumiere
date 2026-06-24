@@ -18,6 +18,7 @@ from lumiere.okx_client import (
     _spread_bps_from_orderbook,
 )
 from lumiere.risk import RiskConfig, RiskManager
+from lumiere.risk_state import RiskStateStore
 
 
 def test_parse_candle_preserves_okx_confirm_flag() -> None:
@@ -332,8 +333,12 @@ class FakeAccountAPI:
 
 
 class FakeMarketAPI:
+    def __init__(self) -> None:
+        self.orderbook_calls = 0
+
     def get_orderbook(self, **kwargs):
         _ = kwargs
+        self.orderbook_calls += 1
         return {
             "code": "0",
             "data": [
@@ -379,6 +384,50 @@ async def test_fetch_account_snapshot_combines_balances_positions_fills_and_orde
     assert snapshot.daily_trade_count == 2
     assert snapshot.spread_bps == Decimal("200")
     assert snapshot.estimated_total_cost_bps is not None
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_snapshot_updates_persistent_drawdown_and_fetches_edge_costs(
+    tmp_path,
+) -> None:
+    class MutableAccountAPI(FakeAccountAPI):
+        def __init__(self) -> None:
+            self.equity = "1000"
+
+        def get_account_balance(self):
+            payload = super().get_account_balance()
+            payload["data"][0]["totalEq"] = self.equity
+            return payload
+
+    fake_trade = FakeTradeAPI()
+    account = MutableAccountAPI()
+    market = FakeMarketAPI()
+    settings = Settings(
+        _env_file=None,
+        okx_api_key="key",
+        okx_api_secret="secret",
+        okx_passphrase="passphrase",
+        telegram_bot_token="token",
+        risk_state_path=str(tmp_path / "risk_state.json"),
+    )
+    client = OKXDemoClient.__new__(OKXDemoClient)
+    client.settings = settings
+    client.risk_manager = RiskManager(
+        RiskConfig(cooldown_seconds=0, min_expected_edge_buffer_bps=Decimal("1"))
+    )
+    client._account = account
+    client._market = market
+    client._trade = fake_trade
+    client._risk_state_store = RiskStateStore(settings.risk_state_path)
+
+    first = await client.fetch_account_snapshot()
+    account.equity = "950"
+    second = await client.fetch_account_snapshot()
+
+    assert first.max_drawdown_usdt == Decimal("0")
+    assert second.max_drawdown_usdt == Decimal("50")
+    assert second.estimated_total_cost_bps is not None
+    assert market.orderbook_calls == 2
 
 
 @pytest.mark.asyncio

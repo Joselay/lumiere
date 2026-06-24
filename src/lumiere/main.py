@@ -12,6 +12,7 @@ from lumiere.logging_config import configure_logging
 from lumiere.okx_client import OKXDemoClient
 from lumiere.paper_trading import PaperTradingLedger
 from lumiere.risk import RiskManager
+from lumiere.risk_audit import assert_risk_audit_passes
 from lumiere.telegram_bot import run_bot
 
 log = structlog.get_logger(__name__)
@@ -39,6 +40,7 @@ def build_engine(settings: Settings) -> TradingEngine:
 
 async def main() -> None:
     settings = Settings()
+    assert_risk_audit_passes(settings)
     configure_logging(settings.log_level)
     log.info(
         "lumiere_starting",

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import cached_property
 from pathlib import Path
 
@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     risk_require_performance_gate: bool = False
     paper_ledger_path: str = "data/paper_trading.jsonl"
     attribution_ledger_path: str = "data/attribution.jsonl"
+    risk_state_path: str = "data/risk_state.json"
     performance_gate_min_trades: int = 20
     performance_gate_min_net_pnl_usdt: Decimal = Decimal("0")
     performance_gate_max_drawdown_usdt: Decimal = Decimal("0")
@@ -117,6 +118,15 @@ class Settings(BaseSettings):
         if value not in STRATEGY_NAMES:
             raise ValueError(f"unsupported strategy: {value}")
         return value
+
+    @field_validator(
+        "risk_max_risk_per_trade_pct",
+        "risk_max_portfolio_exposure_pct",
+        mode="before",
+    )
+    @classmethod
+    def percentage_settings_accept_human_units(cls, value: object) -> object:
+        return _parse_percentage_fraction(value)
 
     @cached_property
     def enabled_inst_ids(self) -> tuple[str, ...]:
@@ -236,6 +246,35 @@ class Settings(BaseSettings):
 
 def _positive_decimal_or_none(value: Decimal) -> Decimal | None:
     return value if value > 0 else None
+
+
+def _parse_percentage_fraction(value: object) -> object:
+    """Parse *_PCT settings as safe fractions.
+
+    Programmatic Decimal defaults keep their existing fraction semantics (`1` means 100%).
+    Environment strings may use either explicit percent notation (`1%`) or human whole
+    percentages (`1` means 1%, `100` means 100%) so an env typo cannot silently turn a
+    1% risk limit into a 100% risk limit.
+    """
+
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    if not raw:
+        return value
+    has_percent_suffix = raw.endswith("%")
+    numeric = raw[:-1].strip() if has_percent_suffix else raw
+    try:
+        decimal = Decimal(numeric)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid percentage value: {value!r}") from exc
+    if decimal < 0:
+        raise ValueError("percentage values cannot be negative")
+    if has_percent_suffix or decimal >= 1:
+        if decimal > 100:
+            raise ValueError("percentage values cannot exceed 100%")
+        return decimal / Decimal("100")
+    return decimal
 
 
 def _parse_inst_ids(raw: str) -> tuple[str, ...]:

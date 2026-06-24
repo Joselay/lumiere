@@ -54,10 +54,10 @@ class RiskConfig:
             raise ValueError("max_spread_bps must be positive when configured")
         if self.min_expected_edge_buffer_bps < 0:
             raise ValueError("min_expected_edge_buffer_bps cannot be negative")
-        if self.max_risk_per_trade_pct < 0:
-            raise ValueError("max_risk_per_trade_pct cannot be negative")
-        if self.max_portfolio_exposure_pct <= 0:
-            raise ValueError("max_portfolio_exposure_pct must be positive")
+        if self.max_risk_per_trade_pct < 0 or self.max_risk_per_trade_pct > 1:
+            raise ValueError("max_risk_per_trade_pct must be between 0 and 1")
+        if self.max_portfolio_exposure_pct <= 0 or self.max_portfolio_exposure_pct > 1:
+            raise ValueError("max_portfolio_exposure_pct must be between 0 and 1")
         if self.drawdown_derisk_threshold_usdt < 0:
             raise ValueError("drawdown_derisk_threshold_usdt cannot be negative")
         if self.drawdown_derisk_multiplier <= 0 or self.drawdown_derisk_multiplier > 1:
@@ -82,6 +82,10 @@ class RiskConfig:
         if self.min_order_by_inst_id is None:
             return self.min_order_btc
         return self.min_order_by_inst_id.get(inst_id, self.min_order_btc)
+
+    @property
+    def requires_execution_quality(self) -> bool:
+        return self.max_spread_bps is not None or self.min_expected_edge_buffer_bps > 0
 
 
 @dataclass(frozen=True, slots=True)
