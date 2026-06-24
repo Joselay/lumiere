@@ -21,6 +21,7 @@ class MarketCandle:
     low: Decimal
     close: Decimal
     volume: Decimal = Decimal("0")
+    confirmed: bool = True
 
 
 @dataclass(frozen=True, slots=True)

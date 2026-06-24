@@ -74,6 +74,36 @@ class CollectingNotifier:
 
 
 @pytest.mark.asyncio
+async def test_engine_ignores_unconfirmed_latest_candle_by_default() -> None:
+    market = candles(["100", "101", "110"])
+    market[-1] = MarketCandle(
+        ts=market[-1].ts,
+        open=market[-1].open,
+        high=market[-1].high,
+        low=market[-1].low,
+        close=market[-1].close,
+        confirmed=False,
+    )
+    client = FakeClient(market)
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(
+                fast_window=2,
+                slow_window=3,
+                trade_size_btc=Decimal("0.001"),
+            )
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=0)),
+    )
+
+    await engine.tick()
+
+    assert client.orders == []
+    assert engine.status().last_decision == "BTC-USDT:hold"
+
+
+@pytest.mark.asyncio
 async def test_engine_tick_places_order_from_strategy_signal() -> None:
     client = FakeClient(candles(["100", "101", "110"]))
     notifier = CollectingNotifier()

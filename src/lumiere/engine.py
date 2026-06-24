@@ -15,6 +15,7 @@ from lumiere.ledger import TradeFill
 from lumiere.models import (
     AccountSnapshot,
     DecisionAction,
+    MarketCandle,
     OrderRequest,
     OrderResult,
     StrategyDecision,
@@ -73,6 +74,7 @@ class EngineConfig:
     poll_interval_seconds: float = 30.0
     td_mode: str = "cash"
     order_type: str = "market"
+    experimental_intrabar: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +234,15 @@ class TradingEngine:
             self._last_account = account
             self._record_attribution_account(account)
             for strategy in self.strategies:
-                candles = await self.client.fetch_candles(strategy.config.inst_id)
+                raw_candles = await self.client.fetch_candles(strategy.config.inst_id)
+                candles = _decision_candles(raw_candles, intrabar=self.config.experimental_intrabar)
+                if not candles:
+                    log.warning(
+                        "strategy_decision_skipped",
+                        inst_id=strategy.config.inst_id,
+                        reason="no_confirmed_candles",
+                    )
+                    continue
                 self._record_attribution_candles(strategy.config.inst_id, candles)
                 decision = strategy.decide(candles, account)
                 self._record_paper_decision(strategy, candles)
@@ -428,6 +438,13 @@ class TradingEngine:
             return False
         self._risk_notification_sent_at[key] = now
         return True
+
+
+def _decision_candles(candles, *, intrabar: bool) -> list[MarketCandle]:
+    ordered = sorted(candles, key=lambda candle: candle.ts)
+    if intrabar:
+        return ordered
+    return [candle for candle in ordered if getattr(candle, "confirmed", True)]
 
 
 def _decimal_or_none(value: object) -> Decimal | None:

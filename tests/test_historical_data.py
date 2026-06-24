@@ -101,6 +101,7 @@ def test_historical_dataset_round_trips_with_checksum_metadata(tmp_path) -> None
             high=Decimal("2"),
             low=Decimal("1"),
             close=Decimal("2"),
+            confirmed=False,
         ),
     )
 

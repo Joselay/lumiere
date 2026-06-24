@@ -320,7 +320,7 @@ def dataset_exists(
 
 
 def candles_to_csv_text(candles: tuple[MarketCandle, ...]) -> str:
-    lines = ["ts,open,high,low,close,volume\n"]
+    lines = ["ts,open,high,low,close,volume,confirmed\n"]
     for candle in candles:
         lines.append(
             ",".join(
@@ -331,6 +331,7 @@ def candles_to_csv_text(candles: tuple[MarketCandle, ...]) -> str:
                     str(candle.low),
                     str(candle.close),
                     str(candle.volume),
+                    "1" if candle.confirmed else "0",
                 ]
             )
             + "\n"
@@ -348,6 +349,7 @@ def csv_text_to_candles(csv_text: str) -> tuple[MarketCandle, ...]:
             low=Decimal(row["low"]),
             close=Decimal(row["close"]),
             volume=Decimal(row.get("volume") or "0"),
+            confirmed=(row.get("confirmed") or "1") in {"1", "true", "True"},
         )
         for row in rows
     ]

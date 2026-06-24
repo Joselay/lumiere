@@ -60,7 +60,10 @@ class OKXDemoClient:
         )
         data = _require_ok_response(response)
         candles = [_parse_candle(row) for row in data]
-        return sorted(candles, key=lambda candle: candle.ts)
+        return sorted(
+            (candle for candle in candles if candle.confirmed),
+            key=lambda candle: candle.ts,
+        )
 
     async def fetch_account_snapshot(self) -> AccountSnapshot:
         inst_ids = self.settings.enabled_inst_ids
@@ -460,6 +463,7 @@ def _redact_sensitive(value: Any) -> Any:
 
 def _parse_candle(row: list[str]) -> MarketCandle:
     # OKX candle: [ts, open, high, low, close, volume, volCcy, volCcyQuote, confirm]
+    # confirm is "0" while the latest candle is still forming and can repaint.
     return MarketCandle(
         ts=datetime.fromtimestamp(int(row[0]) / 1000, tz=UTC),
         open=Decimal(str(row[1])),
@@ -467,6 +471,7 @@ def _parse_candle(row: list[str]) -> MarketCandle:
         low=Decimal(str(row[3])),
         close=Decimal(str(row[4])),
         volume=Decimal(str(row[5])) if len(row) > 5 else Decimal("0"),
+        confirmed=(str(row[8]) == "1") if len(row) > 8 else True,
     )
 
 

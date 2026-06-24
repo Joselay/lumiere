@@ -10,8 +10,10 @@ from lumiere.strategy_evaluation import (
     EvaluationConfig,
     MovingAverageCandidate,
     evaluate_parameter_grid,
+    split_backtest_reports,
     train_test_split,
     train_validation_test_split,
+    walk_forward_backtest_reports,
     walk_forward_splits,
 )
 
@@ -48,6 +50,47 @@ def test_train_validation_test_split_boundaries_are_chronological_and_disjoint()
     assert [candle.close for candle in validation.candles] == [6, 7]
     assert [candle.close for candle in test.candles] == [8, 9, 10]
     assert train.candles[-1].ts < validation.candles[0].ts < test.candles[0].ts
+
+
+def test_split_and_walk_forward_reports_use_no_lookahead_timing() -> None:
+    market = candles(["100", "101", "102", "103", "104", "105", "106", "107"])
+    candidate = MovingAverageCandidate(1, 2, Decimal("1"))
+    config = EvaluationConfig(
+        cost_model=CostModel(
+            taker_fee_bps=Decimal("0"),
+            spread_bps=Decimal("0"),
+            slippage_bps=Decimal("0"),
+        )
+    )
+
+    split_reports = split_backtest_reports(
+        "BTC-USDT",
+        market,
+        candidate,
+        config,
+        train_fraction=Decimal("0.5"),
+        validation_fraction=Decimal("0.25"),
+    )
+    walk_reports = walk_forward_backtest_reports(
+        "BTC-USDT",
+        market,
+        candidate,
+        config,
+        train_size=4,
+        test_size=2,
+        step_size=2,
+    )
+
+    assert all(report.report.execution_timing == "next_open" for report in split_reports)
+    assert all(
+        report.report.assumptions["signal_candle"] == "closed_confirmed"
+        for report in split_reports
+    )
+    assert split_reports[0].report.period_end == market[3].ts
+    assert split_reports[1].report.period_start == market[4].ts
+    assert walk_reports[0]["train"]["period_end"] == market[3].ts.isoformat()
+    assert walk_reports[0]["test"]["period_start"] == market[4].ts.isoformat()
+    assert walk_reports[0]["test"]["execution_timing"] == "next_open"
 
 
 def test_walk_forward_splits_roll_without_lookahead() -> None:
@@ -100,12 +143,13 @@ def test_parameter_grid_sorts_accepted_candidates_before_rejected_candidates() -
         ),
     )
 
-    assert [evaluation.accepted for evaluation in evaluations] == [True, False]
-    assert evaluations[0].candidate == MovingAverageCandidate(1, 2, Decimal("10"))
-    assert (
-        evaluations[0].test_report.metrics.net_pnl_usdt
-        > evaluations[0].test_report.buy_and_hold_pnl_usdt
-    )
+    assert [evaluation.accepted for evaluation in evaluations] == [False, False]
+    assert {evaluation.rejection_reason for evaluation in evaluations} == {"not_enough_trades"}
+    assert evaluations[0].test_report.execution_timing == "next_open"
+    assert {evaluation.candidate for evaluation in evaluations} == {
+        MovingAverageCandidate(2, 3, Decimal("10")),
+        MovingAverageCandidate(1, 2, Decimal("10")),
+    }
 
 
 def test_overfit_gate_rejects_train_test_divergence() -> None:
@@ -127,4 +171,5 @@ def test_overfit_gate_rejects_train_test_divergence() -> None:
     )
 
     assert evaluations[0].accepted is False
-    assert evaluations[0].rejection_reason == "train_test_pnl_divergence"
+    assert evaluations[0].rejection_reason == "net_pnl_not_positive_after_costs"
+    assert evaluations[0].test_report.same_close_comparison is not None

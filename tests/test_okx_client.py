@@ -14,9 +14,43 @@ from lumiere.okx_client import (
     _depth_slippage_bps_from_orderbook,
     _parse_account_balances,
     _parse_btc_position,
+    _parse_candle,
     _spread_bps_from_orderbook,
 )
 from lumiere.risk import RiskConfig, RiskManager
+
+
+def test_parse_candle_preserves_okx_confirm_flag() -> None:
+    confirmed = _parse_candle(["1767225600000", "100", "101", "99", "100", "1", "", "", "1"])
+    unconfirmed = _parse_candle(
+        ["1767225660000", "100", "101", "99", "100", "1", "", "", "0"]
+    )
+
+    assert confirmed.confirmed is True
+    assert unconfirmed.confirmed is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_candles_filters_unconfirmed_okx_candle() -> None:
+    class CandleMarketAPI:
+        def get_candlesticks(self, **kwargs):
+            _ = kwargs
+            return {
+                "code": "0",
+                "data": [
+                    ["1767225660000", "100", "101", "99", "100", "1", "", "", "0"],
+                    ["1767225600000", "90", "91", "89", "90", "1", "", "", "1"],
+                ],
+            }
+
+    client = make_demo_client(FakeTradeAPI())
+    client._market = CandleMarketAPI()
+
+    candles = await client.fetch_candles("BTC-USDT")
+
+    assert len(candles) == 1
+    assert candles[0].close == Decimal("90")
+    assert candles[0].confirmed is True
 
 
 def test_parse_account_balances_includes_spot_btc_and_eth_as_positions() -> None:
