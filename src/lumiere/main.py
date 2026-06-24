@@ -21,11 +21,7 @@ def build_engine(settings: Settings) -> TradingEngine:
     risk_manager = RiskManager(settings.risk_config())
     strategy = settings.strategies()
     client = OKXDemoClient(settings, risk_manager)
-    paper_ledger = (
-        PaperTradingLedger(settings.paper_trading_config())
-        if settings.risk_require_performance_gate
-        else None
-    )
+    paper_ledger = PaperTradingLedger(settings.paper_trading_config())
     attribution_ledger = AttributionLedger(Path(settings.attribution_ledger_path))
     return TradingEngine(
         client=client,

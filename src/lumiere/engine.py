@@ -235,7 +235,7 @@ class TradingEngine:
                 candles = await self.client.fetch_candles(strategy.config.inst_id)
                 self._record_attribution_candles(strategy.config.inst_id, candles)
                 decision = strategy.decide(candles, account)
-                self._record_paper_decision(strategy.name, decision, candles)
+                self._record_paper_decision(strategy, candles)
                 self._record_attribution_decision(strategy.name, decision, candles)
                 self._last_decision = f"{decision.inst_id}:{decision.action.value}"
                 risk_decision = self.risk_manager.assess(decision, account)
@@ -324,10 +324,16 @@ class TradingEngine:
             performance_gate_reason=gate.reason,
         )
 
-    def _record_paper_decision(self, strategy_name: str, decision, candles) -> None:
+    def _record_paper_decision(self, strategy: TradingStrategy, candles) -> None:
         if self.paper_ledger is None or not candles:
             return
-        self.paper_ledger.record_decision(decision, candles[-1], strategy_name=strategy_name)
+        candle = candles[-1]
+        paper_account = self.paper_ledger.account_snapshot(
+            mark_prices={strategy.config.inst_id: candle.close},
+            now=candle.ts,
+        )
+        paper_decision = strategy.decide(candles, paper_account)
+        self.paper_ledger.record_decision(paper_decision, candle, strategy_name=strategy.name)
 
     def _record_attribution_account(self, account: AccountSnapshot) -> None:
         if self.attribution_ledger is not None:

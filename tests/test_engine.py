@@ -6,7 +6,15 @@ from decimal import Decimal
 import pytest
 
 from lumiere.engine import EngineConfig, TradingEngine
-from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, OrderRequest, OrderResult
+from lumiere.models import (
+    AccountSnapshot,
+    DecisionAction,
+    MarketCandle,
+    OrderRequest,
+    OrderResult,
+    Position,
+)
+from lumiere.paper_trading import PaperTradingConfig, PaperTradingLedger
 from lumiere.risk import RiskConfig, RiskManager
 from lumiere.strategy import MovingAverageCrossoverConfig, MovingAverageCrossoverStrategy
 
@@ -86,6 +94,36 @@ async def test_engine_tick_places_order_from_strategy_signal() -> None:
     assert len(client.orders) == 1
     assert client.orders[0].side is DecisionAction.BUY
     assert "<b>BUY BTC-USDT</b>" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_engine_records_paper_decision_against_shadow_portfolio(tmp_path) -> None:
+    client = FakeClient(candles(["110", "101", "100"]))
+    # The live/demo account holds BTC, which should make the live strategy sell on a down-cross.
+    # Paper is flat and must hold instead of fabricating a sell fill from live inventory.
+    client.account = AccountSnapshot(
+        equity_usdt=Decimal("1000"),
+        available_usdt=Decimal("1000"),
+        btc_position=Position("BTC-USDT", Decimal("1"), Decimal("105")),
+    )
+    paper = PaperTradingLedger(PaperTradingConfig(path=tmp_path / "paper.jsonl"))
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(
+                fast_window=2, slow_window=3, trade_size_btc=Decimal("0.001")
+            )
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=0)),
+        paper_ledger=paper,
+    )
+
+    await engine.tick()
+
+    assert [order.side for order in client.orders] == [DecisionAction.SELL]
+    assert [event["type"] for event in paper.events] == ["decision", "portfolio_state"]
+    assert paper.events[0]["action"] == "hold"
+    assert paper.events[0]["inputs"]["position_base"] == "0"
 
 
 @pytest.mark.asyncio
