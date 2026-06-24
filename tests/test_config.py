@@ -5,6 +5,7 @@ from decimal import Decimal
 import pytest
 
 from lumiere.config import Settings
+from lumiere.strategies import RsiMeanReversionStrategy
 
 
 def make_settings(**overrides) -> Settings:
@@ -41,6 +42,15 @@ def test_settings_uses_eth_specific_trade_and_risk_sizes() -> None:
 def test_settings_rejects_unsupported_symbols() -> None:
     with pytest.raises(ValueError, match="supported symbols"):
         make_settings(okx_inst_ids="BTC-USDT,SOL-USDT")
+
+
+def test_strategy_can_be_selected_by_config() -> None:
+    settings = make_settings(strategy_name="rsi_mean_reversion", strategy_rsi_period=5)
+
+    strategies = settings.strategies()
+
+    assert all(isinstance(strategy, RsiMeanReversionStrategy) for strategy in strategies)
+    assert strategies[0].config.rsi_period == 5
 
 
 def test_settings_maps_optional_profitability_risk_controls() -> None:

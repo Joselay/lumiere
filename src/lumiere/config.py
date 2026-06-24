@@ -7,7 +7,8 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from lumiere.risk import RiskConfig
-from lumiere.strategy import MovingAverageCrossoverConfig
+from lumiere.strategy import MovingAverageCrossoverConfig, TradingStrategy
+from lumiere.strategy_factory import STRATEGY_NAMES, build_strategy
 
 SUPPORTED_INST_IDS = ("BTC-USDT", "ETH-USDT")
 
@@ -38,12 +39,20 @@ class Settings(BaseSettings):
     engine_candle_bar: str = "1m"
     engine_candle_limit: int = 80
 
+    strategy_name: str = "moving_average_crossover"
     strategy_fast_window: int = 5
     strategy_slow_window: int = 20
     strategy_trade_size_btc: Decimal = Decimal("0.001")
     strategy_trade_size_eth: Decimal = Decimal("0.01")
     strategy_dust_threshold_btc: Decimal = Decimal("0.00001")
     strategy_dust_threshold_eth: Decimal = Decimal("0.0001")
+    strategy_rsi_period: int = 14
+    strategy_oversold_rsi: Decimal = Decimal("30")
+    strategy_overbought_rsi: Decimal = Decimal("70")
+    strategy_breakout_lookback: int = 20
+    strategy_breakout_atr_period: int = 14
+    strategy_breakout_atr_multiplier: Decimal = Decimal("0.5")
+    strategy_breakout_min_atr_pct: Decimal = Decimal("0.001")
 
     risk_max_position_btc: Decimal = Decimal("0.005")
     risk_max_position_eth: Decimal = Decimal("0.05")
@@ -84,6 +93,13 @@ class Settings(BaseSettings):
             raise ValueError("OKX_ORDER_TAG must be alphanumeric and at most 16 characters")
         return value
 
+    @field_validator("strategy_name")
+    @classmethod
+    def supported_strategy_name(cls, value: str) -> str:
+        if value not in STRATEGY_NAMES:
+            raise ValueError(f"unsupported strategy: {value}")
+        return value
+
     @cached_property
     def enabled_inst_ids(self) -> tuple[str, ...]:
         inst_ids = (
@@ -111,6 +127,26 @@ class Settings(BaseSettings):
                 slow_window=self.strategy_slow_window,
                 trade_size_btc=self._trade_size_for(inst_id),
                 dust_threshold_btc=self._dust_threshold_for(inst_id),
+            )
+            for inst_id in self.enabled_inst_ids
+        )
+
+    def strategies(self) -> tuple[TradingStrategy, ...]:
+        return tuple(
+            build_strategy(
+                self.strategy_name,
+                inst_id=inst_id,
+                trade_size_btc=self._trade_size_for(inst_id),
+                dust_threshold_btc=self._dust_threshold_for(inst_id),
+                fast_window=self.strategy_fast_window,
+                slow_window=self.strategy_slow_window,
+                rsi_period=self.strategy_rsi_period,
+                oversold_rsi=self.strategy_oversold_rsi,
+                overbought_rsi=self.strategy_overbought_rsi,
+                breakout_lookback=self.strategy_breakout_lookback,
+                breakout_atr_period=self.strategy_breakout_atr_period,
+                breakout_atr_multiplier=self.strategy_breakout_atr_multiplier,
+                breakout_min_atr_pct=self.strategy_breakout_min_atr_pct,
             )
             for inst_id in self.enabled_inst_ids
         )

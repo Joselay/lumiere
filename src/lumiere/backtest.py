@@ -15,7 +15,7 @@ from lumiere.ledger import (
     risk_adjusted_ratios,
 )
 from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position
-from lumiere.strategy import MovingAverageCrossoverStrategy
+from lumiere.strategy import TradingStrategy
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +109,7 @@ class BacktestReport:
 class Backtester:
     def __init__(
         self,
-        strategy: MovingAverageCrossoverStrategy,
+        strategy: TradingStrategy,
         config: BacktestConfig | None = None,
     ) -> None:
         self.strategy = strategy

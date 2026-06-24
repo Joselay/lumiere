@@ -17,14 +17,14 @@ from lumiere.historical_data import (
     save_dataset,
 )
 from lumiere.models import MarketCandle
-from lumiere.strategy import MovingAverageCrossoverConfig, MovingAverageCrossoverStrategy
+from lumiere.strategy import TradingStrategy
 from lumiere.strategy_evaluation import (
     EvaluationConfig,
-    MovingAverageCandidate,
     baseline_comparison,
-    split_backtest_reports,
-    walk_forward_backtest_reports,
+    train_validation_test_split,
+    walk_forward_splits,
 )
+from lumiere.strategy_factory import STRATEGY_NAMES, build_strategy
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,10 +46,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore existing cache and refetch",
     )
     parser.add_argument("--starting-equity-usdt", default="1000")
+    parser.add_argument("--strategy", choices=STRATEGY_NAMES, default="moving_average_crossover")
     parser.add_argument("--fast-window", type=int, default=5)
     parser.add_argument("--slow-window", type=int, default=20)
     parser.add_argument("--trade-size-btc", default="0.001")
     parser.add_argument("--trade-size-eth", default="0.01")
+    parser.add_argument("--rsi-period", type=int, default=14)
+    parser.add_argument("--oversold-rsi", default="30")
+    parser.add_argument("--overbought-rsi", default="70")
+    parser.add_argument("--breakout-lookback", type=int, default=20)
+    parser.add_argument("--breakout-atr-period", type=int, default=14)
+    parser.add_argument("--breakout-atr-multiplier", default="0.5")
+    parser.add_argument("--breakout-min-atr-pct", default="0.001")
     parser.add_argument("--taker-fee-bps", default="10")
     parser.add_argument("--spread-bps", default="2")
     parser.add_argument("--slippage-bps", default="5")
@@ -95,31 +103,15 @@ async def run_backtest(args: argparse.Namespace) -> list[dict]:
             refresh_cache=args.refresh_cache,
             data_client=data_client,
         )
-        configured_size = args.trade_size_eth if inst_id.startswith("ETH-") else args.trade_size_btc
-        trade_size = Decimal(configured_size)
-        strategy = MovingAverageCrossoverStrategy(
-            MovingAverageCrossoverConfig(
-                inst_id=inst_id,
-                fast_window=args.fast_window,
-                slow_window=args.slow_window,
-                trade_size_btc=trade_size,
-            )
-        )
-        report = Backtester(
-            strategy,
-            BacktestConfig(
-                starting_equity_usdt=Decimal(args.starting_equity_usdt),
-                cost_model=cost_model,
-            ),
-        ).run(candles)
-        candidate = MovingAverageCandidate(args.fast_window, args.slow_window, trade_size)
+        strategy = _strategy_from_args(args, inst_id)
+        report = _run_strategy_report(strategy, candles, evaluation_config)
         payload = report.to_dict()
         payload["baseline_comparison"] = baseline_comparison(report)
         payload["dataset"] = None if dataset_metadata is None else dataset_metadata.to_json_dict()
         payload["split_reports"] = _safe_split_reports(
             inst_id,
             candles,
-            candidate,
+            args,
             evaluation_config,
             train_fraction=Decimal(args.train_fraction),
             validation_fraction=Decimal(args.validation_fraction),
@@ -127,7 +119,7 @@ async def run_backtest(args: argparse.Namespace) -> list[dict]:
         payload["walk_forward_reports"] = _safe_walk_forward_reports(
             inst_id,
             candles,
-            candidate,
+            args,
             evaluation_config,
             train_size=args.walk_forward_train_size,
             test_size=args.walk_forward_test_size,
@@ -184,7 +176,7 @@ async def _load_or_fetch_candles(
 def _safe_split_reports(
     inst_id: str,
     candles: list[MarketCandle],
-    candidate: MovingAverageCandidate,
+    args: argparse.Namespace,
     config: EvaluationConfig,
     *,
     train_fraction: Decimal,
@@ -192,23 +184,25 @@ def _safe_split_reports(
 ) -> list[dict]:
     if len(candles) < 3:
         return []
-    return [
-        report.to_dict()
-        for report in split_backtest_reports(
-            inst_id,
-            candles,
-            candidate,
-            config,
-            train_fraction=train_fraction,
-            validation_fraction=validation_fraction,
-        )
-    ]
+    reports = []
+    for split in train_validation_test_split(
+        candles,
+        train_fraction=train_fraction,
+        validation_fraction=validation_fraction,
+    ):
+        report = _run_strategy_report(_strategy_from_args(args, inst_id), split.candles, config)
+        payload = report.to_dict()
+        payload["split_name"] = split.name
+        payload["role"] = "in_sample" if split.name == "train" else "out_of_sample"
+        payload["baseline_comparison"] = baseline_comparison(report)
+        reports.append(payload)
+    return reports
 
 
 def _safe_walk_forward_reports(
     inst_id: str,
     candles: list[MarketCandle],
-    candidate: MovingAverageCandidate,
+    args: argparse.Namespace,
     config: EvaluationConfig,
     *,
     train_size: int,
@@ -222,17 +216,75 @@ def _safe_walk_forward_reports(
     resolved_test_size = test_size or max(1, int(len(candles) * 0.2))
     if resolved_train_size + resolved_test_size > len(candles):
         return []
-    return list(
-        walk_forward_backtest_reports(
-            inst_id,
-            candles,
-            candidate,
+    reports = []
+    for window in walk_forward_splits(
+        candles,
+        train_size=resolved_train_size,
+        test_size=resolved_test_size,
+        step_size=step_size or None,
+    ):
+        train_report = _run_strategy_report(
+            _strategy_from_args(args, inst_id),
+            window.train,
             config,
-            train_size=resolved_train_size,
-            test_size=resolved_test_size,
-            step_size=step_size or None,
         )
+        test_report = _run_strategy_report(
+            _strategy_from_args(args, inst_id),
+            window.test,
+            config,
+        )
+        reports.append(
+            {
+                "window": window.window,
+                "train": train_report.to_dict()
+                | {
+                    "split_name": f"walk_forward_{window.window}_train",
+                    "role": "in_sample",
+                    "baseline_comparison": baseline_comparison(train_report),
+                },
+                "test": test_report.to_dict()
+                | {
+                    "split_name": f"walk_forward_{window.window}_test",
+                    "role": "out_of_sample",
+                    "baseline_comparison": baseline_comparison(test_report),
+                },
+            }
+        )
+    return reports
+
+
+def _strategy_from_args(args: argparse.Namespace, inst_id: str) -> TradingStrategy:
+    configured_size = args.trade_size_eth if inst_id.startswith("ETH-") else args.trade_size_btc
+    dust_threshold = "0.0001" if inst_id.startswith("ETH-") else "0.00001"
+    return build_strategy(
+        args.strategy,
+        inst_id=inst_id,
+        trade_size_btc=Decimal(configured_size),
+        dust_threshold_btc=Decimal(dust_threshold),
+        fast_window=args.fast_window,
+        slow_window=args.slow_window,
+        rsi_period=args.rsi_period,
+        oversold_rsi=Decimal(args.oversold_rsi),
+        overbought_rsi=Decimal(args.overbought_rsi),
+        breakout_lookback=args.breakout_lookback,
+        breakout_atr_period=args.breakout_atr_period,
+        breakout_atr_multiplier=Decimal(args.breakout_atr_multiplier),
+        breakout_min_atr_pct=Decimal(args.breakout_min_atr_pct),
     )
+
+
+def _run_strategy_report(
+    strategy: TradingStrategy,
+    candles: list[MarketCandle] | tuple[MarketCandle, ...],
+    config: EvaluationConfig,
+):
+    return Backtester(
+        strategy,
+        BacktestConfig(
+            starting_equity_usdt=config.starting_equity_usdt,
+            cost_model=config.cost_model,
+        ),
+    ).run(candles)
 
 
 def main() -> None:

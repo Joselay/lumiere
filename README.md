@@ -17,7 +17,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 | --- | --- |
 | Exchange | OKX demo trading only (`OKX_FLAG=1`) |
 | Symbols | `BTC-USDT`, `ETH-USDT` |
-| Strategy | Moving-average crossover strategy implementation |
+| Strategy | Config-selectable moving-average crossover, RSI mean-reversion, and ATR volatility-breakout strategies |
 | Orders | OKX market buy/sell orders through `python-okx` |
 | Telegram | `/start`, `/status`, `/strategy`, `/performance`, `/risk`, `/pause`, `/resume`, `/panic` |
 | Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, performance gate, max consecutive failures |
@@ -32,6 +32,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 - Supports operator controls for pause, resume, status checks, strategy inspection, and panic stop.
 - Cancels open orders during panic stop.
 - Keeps strategy and risk logic covered by tests so future changes are easier to make safely.
+- Supports config-selected strategy modules via `STRATEGY_NAME=moving_average_crossover`, `rsi_mean_reversion`, or `volatility_breakout`; backtest reports include each strategy's allowed market regimes.
 
 ## Profitability and safety disclaimer
 

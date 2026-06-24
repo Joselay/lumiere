@@ -10,7 +10,7 @@ import structlog
 
 from lumiere.models import AccountSnapshot, DecisionAction, OrderRequest, OrderResult
 from lumiere.risk import RiskManager
-from lumiere.strategy import MovingAverageCrossoverStrategy
+from lumiere.strategy import TradingStrategy
 
 log = structlog.get_logger(__name__)
 
@@ -55,7 +55,7 @@ class TradingEngine:
     def __init__(
         self,
         client: TradingClient,
-        strategy: MovingAverageCrossoverStrategy | Sequence[MovingAverageCrossoverStrategy],
+        strategy: TradingStrategy | Sequence[TradingStrategy],
         risk_manager: RiskManager,
         notifier: Notifier | None = None,
         config: EngineConfig | None = None,
@@ -94,7 +94,7 @@ class TradingEngine:
             last_error=self._last_error,
         )
 
-    def describe_strategies(self) -> tuple[dict[str, str | int], ...]:
+    def describe_strategies(self) -> tuple[dict, ...]:
         return tuple(strategy.describe() for strategy in self.strategies)
 
     async def status_text(self) -> str:
@@ -271,10 +271,10 @@ class TradingEngine:
 
 
 def _normalise_strategies(
-    strategy: MovingAverageCrossoverStrategy | Sequence[MovingAverageCrossoverStrategy],
-) -> tuple[MovingAverageCrossoverStrategy, ...]:
-    if isinstance(strategy, MovingAverageCrossoverStrategy):
-        return (strategy,)
+    strategy: TradingStrategy | Sequence[TradingStrategy],
+) -> tuple[TradingStrategy, ...]:
+    if hasattr(strategy, "decide"):
+        return (strategy,)  # type: ignore[return-value]
     strategies = tuple(strategy)
     if not strategies:
         raise ValueError("at least one strategy is required")

@@ -2,8 +2,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any, Protocol
 
 from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, StrategyDecision
+
+
+class StrategyConfig(Protocol):
+    inst_id: str
+
+
+class TradingStrategy(Protocol):
+    name: str
+    config: StrategyConfig
+
+    def describe(self) -> dict[str, Any]: ...
+
+    def decide(
+        self,
+        candles: list[MarketCandle],
+        account: AccountSnapshot,
+    ) -> StrategyDecision: ...
 
 
 @dataclass(frozen=True, slots=True)

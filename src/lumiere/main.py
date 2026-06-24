@@ -9,7 +9,6 @@ from lumiere.engine import EngineConfig, TradingEngine
 from lumiere.logging_config import configure_logging
 from lumiere.okx_client import OKXDemoClient
 from lumiere.risk import RiskManager
-from lumiere.strategy import MovingAverageCrossoverStrategy
 from lumiere.telegram_bot import run_bot
 
 log = structlog.get_logger(__name__)
@@ -17,9 +16,7 @@ log = structlog.get_logger(__name__)
 
 def build_engine(settings: Settings) -> TradingEngine:
     risk_manager = RiskManager(settings.risk_config())
-    strategy = tuple(
-        MovingAverageCrossoverStrategy(config) for config in settings.strategy_configs()
-    )
+    strategy = settings.strategies()
     client = OKXDemoClient(settings, risk_manager)
     return TradingEngine(
         client=client,
