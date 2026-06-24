@@ -132,6 +132,8 @@ OKX_INST_IDS=BTC-USDT,ETH-USDT
 
 Before increasing size, follow the staged [go-live profitability runbook](docs/go_live_runbook.md). It defines go/no-go thresholds, rollback rules, observation periods, and the `uv run lumiere-evidence` readiness audit required for promotion decisions. The audit exits non-zero and reports severity-sorted blockers until optimizer/backtest artifacts, paper/demo ledgers, fill reconciliation, observation duration, gate history, alert state, and current runtime config all satisfy the stage rules.
 
+For demo-only research that is explicitly not promotion evidence, `DEMO_RESEARCH_MODE=true` waives the optimizer-candidate and performance-gate startup checks while preserving the demo guard and other configured risk controls. Use it only with bounded risk settings such as `RISK_MAX_DAILY_TRADES`, spread/drawdown/edge guards, clean research ledgers, and restricted Telegram access.
+
 ## Development
 
 ```bash

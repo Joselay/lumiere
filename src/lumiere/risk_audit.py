@@ -37,6 +37,7 @@ class RiskAuditReport:
 def audit_settings(settings: Settings) -> RiskAuditReport:
     risk = settings.risk_config()
     optimizer_check = _optimizer_candidate_check(settings)
+    research_mode = settings.demo_research_mode
     checks = [
         RiskAuditCheck(
             "telegram_access_restricted",
@@ -45,8 +46,8 @@ def audit_settings(settings: Settings) -> RiskAuditReport:
         ),
         RiskAuditCheck(
             "performance_gate_required",
-            risk.performance_gate_required,
-            "RISK_REQUIRE_PERFORMANCE_GATE must be enabled",
+            risk.performance_gate_required or research_mode,
+            "RISK_REQUIRE_PERFORMANCE_GATE must be enabled unless DEMO_RESEARCH_MODE=true",
         ),
         RiskAuditCheck(
             "spread_guard_configured",
@@ -60,8 +61,10 @@ def audit_settings(settings: Settings) -> RiskAuditReport:
         ),
         RiskAuditCheck(
             "optimizer_candidate_approved",
-            optimizer_check[0],
-            optimizer_check[1],
+            optimizer_check[0] or research_mode,
+            optimizer_check[1]
+            if not research_mode
+            else "DEMO_RESEARCH_MODE=true: optimizer candidate is waived for demo research only",
         ),
         RiskAuditCheck(
             "drawdown_cap_configured",
@@ -92,6 +95,11 @@ def audit_settings(settings: Settings) -> RiskAuditReport:
             ),
             "post-only maker mode requires RISK_MAX_MAKER_NON_FILL_RATE and "
             "RISK_MAX_MAKER_ADVERSE_SELECTION_BPS",
+        ),
+        RiskAuditCheck(
+            "research_daily_trade_limit_configured",
+            not research_mode or risk.max_daily_trades is not None,
+            "DEMO_RESEARCH_MODE requires RISK_MAX_DAILY_TRADES to bound exploratory turnover",
         ),
     ]
     return RiskAuditReport(tuple(checks))

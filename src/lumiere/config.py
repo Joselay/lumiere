@@ -100,6 +100,7 @@ class Settings(BaseSettings):
     performance_gate_max_drawdown_usdt: Decimal = Decimal("0")
     performance_gate_min_profit_factor: Decimal = Decimal("1")
     performance_gate_max_evidence_age_hours: int = 168
+    demo_research_mode: bool = False
 
     @field_validator("okx_flag")
     @classmethod

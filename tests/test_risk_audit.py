@@ -97,6 +97,40 @@ def test_risk_audit_rejects_oversized_risk_budget(tmp_path) -> None:
     assert "per_trade_risk_configured" in {check.name for check in report.failures()}
 
 
+def test_risk_audit_allows_explicit_research_demo_without_optimizer_candidate(tmp_path) -> None:
+    missing_candidates = tmp_path / "missing.json"
+    settings = make_settings(
+        tmp_path,
+        demo_research_mode=True,
+        risk_require_performance_gate=False,
+        risk_max_daily_trades=20,
+        optimizer_accepted_candidates_path=str(missing_candidates),
+    )
+
+    report = audit_settings(settings)
+
+    assert report.passed
+    assert_risk_audit_passes(settings)
+
+
+def test_risk_audit_requires_daily_trade_limit_in_research_demo(tmp_path) -> None:
+    missing_candidates = tmp_path / "missing.json"
+    settings = make_settings(
+        tmp_path,
+        demo_research_mode=True,
+        risk_require_performance_gate=False,
+        risk_max_daily_trades=0,
+        optimizer_accepted_candidates_path=str(missing_candidates),
+    )
+
+    report = audit_settings(settings)
+
+    assert not report.passed
+    assert "research_daily_trade_limit_configured" in {
+        check.name for check in report.failures()
+    }
+
+
 def test_risk_audit_rejects_uncalibrated_optimizer_candidate(tmp_path) -> None:
     uncalibrated = tmp_path / "uncalibrated_candidates.json"
     uncalibrated.write_text(
