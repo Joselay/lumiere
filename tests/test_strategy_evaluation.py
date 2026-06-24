@@ -79,3 +79,52 @@ def test_parameter_grid_marks_candidates_not_passing_test_gate_as_rejected() -> 
 
     assert evaluations[0].accepted is False
     assert evaluations[0].rejection_reason == "not_enough_trades"
+
+
+def test_parameter_grid_sorts_accepted_candidates_before_rejected_candidates() -> None:
+    evaluations = evaluate_parameter_grid(
+        "BTC-USDT",
+        candles(["100", "90", "91", "150", "100", "90", "91", "150"]),
+        (
+            MovingAverageCandidate(2, 3, Decimal("10")),
+            MovingAverageCandidate(1, 2, Decimal("10")),
+        ),
+        EvaluationConfig(
+            train_fraction=Decimal("0.5"),
+            cost_model=CostModel(
+                taker_fee_bps=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+            ),
+            performance_gate=PerformanceGateConfig(min_trades=1, min_profit_factor=None),
+        ),
+    )
+
+    assert [evaluation.accepted for evaluation in evaluations] == [True, False]
+    assert evaluations[0].candidate == MovingAverageCandidate(1, 2, Decimal("10"))
+    assert (
+        evaluations[0].test_report.metrics.net_pnl_usdt
+        > evaluations[0].test_report.buy_and_hold_pnl_usdt
+    )
+
+
+def test_overfit_gate_rejects_train_test_divergence() -> None:
+    evaluations = evaluate_parameter_grid(
+        "BTC-USDT",
+        candles(["100", "90", "91", "200", "100", "90", "91", "100"]),
+        (MovingAverageCandidate(1, 2, Decimal("10")),),
+        EvaluationConfig(
+            train_fraction=Decimal("0.5"),
+            cost_model=CostModel(
+                taker_fee_bps=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+            ),
+            performance_gate=PerformanceGateConfig(min_trades=1, min_profit_factor=None),
+            max_train_test_pnl_ratio=Decimal("2"),
+            require_baseline_outperformance=False,
+        ),
+    )
+
+    assert evaluations[0].accepted is False
+    assert evaluations[0].rejection_reason == "train_test_pnl_divergence"

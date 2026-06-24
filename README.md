@@ -69,6 +69,18 @@ uv run lumiere-backtest --offline --bar 1m --start 2026-01-01T00:00:00Z --end 20
 
 The JSON report includes full-period metrics plus chronological train/validation/test and rolling walk-forward reports. Each split shows in-sample vs out-of-sample net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, trade count, win rate, profit factor, Sharpe/Sortino when available, rejected order count, and buy-and-hold/no-trade baseline comparisons.
 
+Optimize moving-average candidates with the same cached data and cost assumptions:
+
+```bash
+uv run lumiere-optimize \
+  --inst-id BTC-USDT --bar 1m \
+  --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z \
+  --fast-window 3:12 --slow-window 10:40 \
+  --min-trades 20 --min-walk-forward-windows 3 --min-stable-neighbors 1
+```
+
+The optimizer writes `reports/strategy_optimization/optimizer_report.json` and `accepted_candidates.json`. Candidates are sorted by out-of-sample net PnL, drawdown, profit factor, Sharpe/Sortino, trade count, and win rate, and are rejected unless they pass out-of-sample gates, beat no-trade and buy-and-hold baselines, avoid train/test divergence, and satisfy any configured walk-forward and parameter-stability gates.
+
 ## Symbols
 
 Configure OKX demo symbols with `OKX_INST_IDS`:
