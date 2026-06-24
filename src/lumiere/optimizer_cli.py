@@ -68,10 +68,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cooldown-seconds", type=int, default=300)
     parser.add_argument("--starting-equity-usdt", default="1000")
     parser.add_argument("--taker-fee-bps", default="10")
+    parser.add_argument("--maker-fee-bps", default="2")
     parser.add_argument("--spread-bps", default="2")
     parser.add_argument("--slippage-bps", default="5")
     parser.add_argument("--market-impact-bps", default="0")
     parser.add_argument("--reject-every-n-orders", type=int, default=0)
+    parser.add_argument(
+        "--execution-policy",
+        choices=("market", "marketable_limit", "post_only_maker"),
+        default="market",
+    )
+    parser.add_argument("--marketable-limit-buffer-bps", default="1")
+    parser.add_argument("--post-only-offset-bps", default="0")
+    parser.add_argument("--maker-timeout-bars", type=int, default=1)
+    parser.add_argument("--maker-fill-fraction", default="1")
     parser.add_argument("--train-fraction", default="0.6")
     parser.add_argument("--min-trades", type=int, default=20)
     parser.add_argument("--min-net-pnl-usdt", default="0")
@@ -242,10 +252,18 @@ def _evaluation_config(args: argparse.Namespace, *, inst_ids: tuple[str, ...]) -
         starting_equity_usdt=Decimal(args.starting_equity_usdt),
         cost_model=CostModel(
             taker_fee_bps=Decimal(args.taker_fee_bps),
+            maker_fee_bps=Decimal(getattr(args, "maker_fee_bps", "2")),
             spread_bps=Decimal(args.spread_bps),
             slippage_bps=Decimal(args.slippage_bps),
             market_impact_bps=Decimal(args.market_impact_bps),
             reject_every_n_orders=args.reject_every_n_orders,
+            execution_policy=getattr(args, "execution_policy", "market"),
+            marketable_limit_buffer_bps=Decimal(
+                getattr(args, "marketable_limit_buffer_bps", "1")
+            ),
+            post_only_offset_bps=Decimal(getattr(args, "post_only_offset_bps", "0")),
+            maker_timeout_bars=getattr(args, "maker_timeout_bars", 1),
+            maker_fill_fraction=Decimal(getattr(args, "maker_fill_fraction", "1")),
         ),
         performance_gate=PerformanceGateConfig(
             min_trades=args.min_trades,
@@ -529,10 +547,16 @@ def _criteria_payload(args: argparse.Namespace, *, strategies: tuple[str, ...]) 
         "require_baseline_outperformance": True,
         "cost_model": {
             "taker_fee_bps": args.taker_fee_bps,
+            "maker_fee_bps": getattr(args, "maker_fee_bps", "2"),
             "spread_bps": args.spread_bps,
             "slippage_bps": args.slippage_bps,
             "market_impact_bps": args.market_impact_bps,
             "reject_every_n_orders": args.reject_every_n_orders,
+            "execution_policy": getattr(args, "execution_policy", "market"),
+            "marketable_limit_buffer_bps": getattr(args, "marketable_limit_buffer_bps", "1"),
+            "post_only_offset_bps": getattr(args, "post_only_offset_bps", "0"),
+            "maker_timeout_bars": getattr(args, "maker_timeout_bars", 1),
+            "maker_fill_fraction": getattr(args, "maker_fill_fraction", "1"),
         },
     }
 

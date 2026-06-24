@@ -755,7 +755,10 @@ def _stability_parameters(candidate: OptimizerCandidate) -> dict[str, str | int 
 
 
 def _round_trip_cost_bps(config: EvaluationConfig) -> Decimal:
-    one_way = config.cost_model.order_cost_bps + config.cost_model.taker_fee_bps
+    if config.cost_model.execution_policy == "post_only_maker":
+        one_way = config.cost_model.maker_fee_bps
+    else:
+        one_way = config.cost_model.order_cost_bps + config.cost_model.taker_fee_bps
     return one_way * Decimal("2")
 
 
