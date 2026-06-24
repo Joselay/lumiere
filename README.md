@@ -19,7 +19,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 | Symbols | `BTC-USDT`, `ETH-USDT` |
 | Strategy | Config-selectable moving-average crossover, RSI mean-reversion, and ATR volatility-breakout strategies |
 | Orders | OKX market buy/sell orders through `python-okx` |
-| Telegram | `/start`, `/status`, `/strategy`, `/performance`, `/risk`, `/pause`, `/resume`, `/panic` |
+| Telegram | `/start`, `/help`, `/status`, `/strategy`, `/performance`, `/risk`, `/pause`, `/resume`, `/panic` |
 | Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, order-book execution-cost/expected-edge guard, persistent rolling paper/live performance gate, max consecutive failures |
 | Profitability evidence | OKX SDK historical candle backtests with fees, spread, slippage, rejected-order modeling, PnL ledger metrics, and buy-and-hold/no-trade baselines |
 | Observability | Pretty structured logs plus persistent JSONL attribution ledger with configurable `LOG_LEVEL` |
@@ -29,7 +29,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 - Runs multiple configured symbols from `OKX_INST_IDS`.
 - Reads OKX candles, account balances, and positions.
 - Sends order and risk notifications to Telegram.
-- Supports operator controls for pause, resume, status checks, strategy inspection, and panic stop.
+- Supports operator controls for pause, resume, status checks, strategy inspection, help/menu discovery, and panic stop.
 - Cancels open orders during panic stop.
 - Keeps strategy and risk logic covered by tests so future changes are easier to make safely.
 - Supports config-selected strategy modules via `STRATEGY_NAME=moving_average_crossover`, `rsi_mean_reversion`, or `volatility_breakout`; backtest reports include each strategy's allowed market regimes.
@@ -99,14 +99,15 @@ OKX_INST_IDS=BTC-USDT,ETH-USDT
 ## Telegram controls
 
 ```text
-/start     show that the bot is online
-/status       show engine, account, position, and risk status
-/strategy     show active strategy configuration
-/performance  show daily realized PnL, drawdown, trade count, spread, and gate state
-/risk         show configured risk limits and current open risk inputs
-/pause        pause trading
-/resume       resume trading
-/panic        stop the engine and cancel open orders
+/start       show that the bot is online and list commands
+/help        show all available commands
+/status      show engine, account, position, and risk status
+/strategy    show active strategy configuration
+/performance show daily realized PnL, drawdown, trade count, spread, and gate state
+/risk        show configured risk limits and current open risk inputs
+/pause       pause trading
+/resume      resume trading
+/panic       stop the engine and cancel open orders
 ```
 
 ## Operations

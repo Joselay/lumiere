@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BotCommand, Message
 
 from lumiere.engine import TradingEngine
 
@@ -23,6 +23,23 @@ class TelegramNotifier:
     async def send(self, text: str) -> None:
         for chat_id in self.subscribed_chat_ids:
             await self.bot.send_message(chat_id=chat_id, text=text)
+
+
+BOT_COMMANDS: tuple[BotCommand, ...] = (
+    BotCommand(command="start", description="Show bot status and command list"),
+    BotCommand(command="help", description="Show all available commands"),
+    BotCommand(command="status", description="Show engine status"),
+    BotCommand(command="strategy", description="Show active strategy settings"),
+    BotCommand(command="performance", description="Show PnL and attribution summary"),
+    BotCommand(command="risk", description="Show risk limits and state"),
+    BotCommand(command="pause", description="Pause trading"),
+    BotCommand(command="resume", description="Resume trading"),
+    BotCommand(command="panic", description="Emergency stop until restart"),
+)
+
+COMMAND_HELP_TEXT = "Available commands:\n" + "\n".join(
+    f"/{command.command} - {command.description}" for command in BOT_COMMANDS
+)
 
 
 AccessCheck = Callable[[Message], bool]
@@ -55,7 +72,14 @@ def command_router(
 
     @router.message(Command("start"))
     async def start(message: Message) -> None:
-        await guard(message, lambda: _text("Lumiere OKX demo BTC/ETH bot is online"))
+        await guard(
+            message,
+            lambda: _text(f"Lumiere OKX demo BTC/ETH bot is online\n\n{COMMAND_HELP_TEXT}"),
+        )
+
+    @router.message(Command("help"))
+    async def help_command(message: Message) -> None:
+        await guard(message, lambda: _text(COMMAND_HELP_TEXT))
 
     @router.message(Command("status"))
     async def status(message: Message) -> None:
@@ -112,12 +136,17 @@ async def _text(value: str) -> str:
     return value
 
 
+async def set_bot_commands(bot: Bot) -> None:
+    await bot.set_my_commands(list(BOT_COMMANDS))
+
+
 async def run_bot(
     bot_token: str,
     engine: TradingEngine,
     allowed_chat_ids: set[int],
 ) -> None:
     bot = Bot(token=bot_token)
+    await set_bot_commands(bot)
     notifier = TelegramNotifier(bot, allowed_chat_ids)
     engine.notifier = notifier
     dispatcher = Dispatcher()
