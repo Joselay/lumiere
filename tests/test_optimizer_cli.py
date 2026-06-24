@@ -76,8 +76,19 @@ async def test_optimizer_cli_produces_sorted_report_and_artifacts(tmp_path) -> N
     )
 
     candidates = payload["reports"][0]["candidates"]
-    assert [candidate["accepted"] for candidate in candidates] == [False, False, False]
+    assert payload["reports"][0]["strategies"] == [
+        "moving_average_crossover",
+        "rsi_mean_reversion",
+        "volatility_breakout",
+    ]
+    assert {candidate["candidate"]["strategy"] for candidate in candidates} == {
+        "moving_average_crossover",
+        "rsi_mean_reversion",
+        "volatility_breakout",
+    }
+    assert [candidate["accepted"] for candidate in candidates] == [False] * 5
     assert {candidate["rejection_reason"] for candidate in candidates} == {"not_enough_trades"}
+    assert all("expectancy_calibration" in candidate for candidate in candidates)
     assert candidates[0]["test_report"]["execution_timing"] == "next_open"
     assert payload["accepted_configs"] == []
     assert (tmp_path / "reports" / "optimizer_report.json").exists()

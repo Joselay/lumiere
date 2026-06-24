@@ -9,6 +9,7 @@ from lumiere.paper_gate import PerformanceGateConfig
 from lumiere.strategy_evaluation import (
     EvaluationConfig,
     MovingAverageCandidate,
+    StrategyCandidate,
     evaluate_parameter_grid,
     split_backtest_reports,
     train_test_split,
@@ -150,6 +151,44 @@ def test_parameter_grid_sorts_accepted_candidates_before_rejected_candidates() -
         MovingAverageCandidate(2, 3, Decimal("10")),
         MovingAverageCandidate(1, 2, Decimal("10")),
     }
+
+
+def test_parameter_grid_evaluates_non_ma_candidates_with_empirical_expectancy() -> None:
+    evaluations = evaluate_parameter_grid(
+        "BTC-USDT",
+        candles(["100", "98", "96", "99", "101", "99", "97", "100", "102", "104"]),
+        (
+            StrategyCandidate(
+                "rsi_mean_reversion",
+                Decimal("1"),
+                rsi_period=2,
+                oversold_rsi=Decimal("40"),
+                overbought_rsi=Decimal("70"),
+                stop_loss_bps=Decimal("100"),
+                max_bars_in_trade=2,
+            ),
+        ),
+        EvaluationConfig(
+            train_fraction=Decimal("0.6"),
+            cost_model=CostModel(
+                taker_fee_bps=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+            ),
+            performance_gate=PerformanceGateConfig(
+                min_trades=0,
+                min_net_pnl_usdt=Decimal("-999"),
+                min_profit_factor=None,
+            ),
+            require_baseline_outperformance=False,
+        ),
+    )
+
+    payload = evaluations[0].to_dict()
+    assert payload["candidate"]["strategy"] == "rsi_mean_reversion"
+    assert payload["candidate"]["stop_loss_bps"] == "100"
+    assert payload["expectancy_calibration"]["source"] == "historical_forward_return_after_costs"
+    assert payload["expectancy_calibration"]["signal_count"] > 0
 
 
 def test_overfit_gate_rejects_train_test_divergence() -> None:

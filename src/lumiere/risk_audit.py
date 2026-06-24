@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 from lumiere.config import Settings
@@ -35,6 +36,7 @@ class RiskAuditReport:
 
 def audit_settings(settings: Settings) -> RiskAuditReport:
     risk = settings.risk_config()
+    optimizer_check = _optimizer_candidate_check(settings)
     checks = [
         RiskAuditCheck(
             "telegram_access_restricted",
@@ -55,6 +57,11 @@ def audit_settings(settings: Settings) -> RiskAuditReport:
             "edge_cost_buffer_configured",
             risk.min_expected_edge_buffer_bps > 0,
             "RISK_MIN_EXPECTED_EDGE_BUFFER_BPS must be positive",
+        ),
+        RiskAuditCheck(
+            "optimizer_candidate_approved",
+            optimizer_check[0],
+            optimizer_check[1],
         ),
         RiskAuditCheck(
             "drawdown_cap_configured",
@@ -86,6 +93,93 @@ def assert_risk_audit_passes(settings: Settings) -> None:
         return
     failures = "; ".join(f"{check.name}: {check.message}" for check in report.failures())
     raise RuntimeError(f"risk audit failed: {failures}")
+
+
+def _optimizer_candidate_check(settings: Settings) -> tuple[bool, str]:
+    path = Path(settings.optimizer_accepted_candidates_path)
+    if not path.exists():
+        return False, "OPTIMIZER_ACCEPTED_CANDIDATES_PATH must point to optimizer output"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"optimizer accepted-candidates file is unreadable: {exc}"
+    configs = payload.get("accepted_configs", [])
+    if not isinstance(configs, list):
+        return False, "optimizer accepted-candidates file must contain accepted_configs"
+    missing = [
+        inst_id
+        for inst_id in settings.enabled_inst_ids
+        if not any(_candidate_matches_settings(item, settings, inst_id) for item in configs)
+    ]
+    if missing:
+        return (
+            False,
+            "current live/demo strategy must match an optimizer-passed accepted candidate "
+            f"with calibrated positive expected edge; missing {', '.join(missing)}",
+        )
+    return True, "current strategy has an optimizer-passed calibrated expected edge"
+
+
+def _candidate_matches_settings(item: object, settings: Settings, inst_id: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    candidate = item.get("candidate")
+    if not isinstance(candidate, dict):
+        candidate = item
+    if item.get("inst_id") != inst_id:
+        return False
+    if (item.get("strategy") or candidate.get("strategy")) != settings.strategy_name:
+        return False
+    if item.get("optimizer_passed") is not True:
+        return False
+    if item.get("expected_edge_source") != "historical_forward_return_after_costs":
+        return False
+    edge = _decimal_or_none(item.get("expected_edge_bps"))
+    if edge is None or edge <= 0:
+        return False
+    if not _candidate_parameters_match(candidate, settings):
+        return False
+    calibration = item.get("expectancy_calibration")
+    return isinstance(calibration, dict) and calibration.get("calibrated") is True
+
+
+def _candidate_parameters_match(candidate: dict[str, Any], settings: Settings) -> bool:
+    if settings.strategy_name == "moving_average_crossover":
+        return _int(candidate.get("fast_window")) == settings.strategy_fast_window and _int(
+            candidate.get("slow_window")
+        ) == settings.strategy_slow_window
+    if settings.strategy_name == "rsi_mean_reversion":
+        return (
+            _int(candidate.get("rsi_period")) == settings.strategy_rsi_period
+            and _decimal_or_none(candidate.get("oversold_rsi")) == settings.strategy_oversold_rsi
+            and _decimal_or_none(candidate.get("overbought_rsi"))
+            == settings.strategy_overbought_rsi
+        )
+    if settings.strategy_name == "volatility_breakout":
+        return (
+            _int(candidate.get("breakout_lookback")) == settings.strategy_breakout_lookback
+            and _int(candidate.get("breakout_atr_period"))
+            == settings.strategy_breakout_atr_period
+            and _decimal_or_none(candidate.get("breakout_atr_multiplier"))
+            == settings.strategy_breakout_atr_multiplier
+            and _decimal_or_none(candidate.get("breakout_min_atr_pct"))
+            == settings.strategy_breakout_min_atr_pct
+        )
+    return False
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _int(value: object) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def main() -> None:

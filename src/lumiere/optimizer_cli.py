@@ -5,6 +5,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +24,25 @@ from lumiere.paper_gate import PerformanceGateConfig
 from lumiere.risk import RiskConfig
 from lumiere.strategy_evaluation import (
     EvaluationConfig,
-    MovingAverageCandidate,
+    OptimizerCandidate,
+    StrategyCandidate,
+    candidate_to_dict,
     evaluate_parameter_grid,
 )
+from lumiere.strategy_factory import STRATEGY_NAMES
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Optimize Lumiere MA strategy candidates")
+    parser = argparse.ArgumentParser(description="Optimize Lumiere strategy candidates")
     parser.add_argument("--inst-id", action="append", choices=SUPPORTED_INST_IDS, dest="inst_ids")
     parser.add_argument("--bar", action="append", default=None, help="OKX bar; repeat to test many")
+    parser.add_argument(
+        "--strategy",
+        action="append",
+        choices=STRATEGY_NAMES,
+        dest="strategies",
+        help="strategy to optimize; repeat or omit to test all",
+    )
     parser.add_argument("--limit", type=int, default=300, help="OKX candles per page")
     parser.add_argument("--start", help="inclusive UTC start time")
     parser.add_argument("--end", help="inclusive UTC end time")
@@ -41,6 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", default="reports/strategy_optimization")
     parser.add_argument("--fast-window", default="3:12", help="comma list or inclusive range a:b")
     parser.add_argument("--slow-window", default="10:40", help="comma list or inclusive range a:b")
+    parser.add_argument("--rsi-period", default="7,14,21")
+    parser.add_argument("--oversold-rsi", default="25,30,35")
+    parser.add_argument("--overbought-rsi", default="65,70,75")
+    parser.add_argument("--breakout-lookback", default="10,20,40")
+    parser.add_argument("--breakout-atr-period", default="7,14,21")
+    parser.add_argument("--breakout-atr-multiplier", default="0.25,0.5,1")
+    parser.add_argument("--breakout-min-atr-pct", default="0.0005,0.001,0.002")
+    parser.add_argument("--stop-loss-bps", default="none")
+    parser.add_argument("--take-profit-bps", default="none")
+    parser.add_argument("--trailing-stop-bps", default="none")
+    parser.add_argument("--max-bars-in-trade", default="none")
     parser.add_argument("--trade-size-btc", default="0.001")
     parser.add_argument("--trade-size-eth", default="0.01")
     parser.add_argument("--cooldown-seconds", type=int, default=300)
@@ -62,12 +84,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-walk-forward-pass-rate", default="0.5")
     parser.add_argument("--min-stable-neighbors", type=int, default=0)
     parser.add_argument("--parameter-stability-radius", type=int, default=1)
+    parser.add_argument("--min-calibration-signals", type=int, default=3)
+    parser.add_argument("--min-expected-edge-bps", default="0")
+    parser.add_argument("--expectancy-horizon-bars", type=int, default=1)
     return parser
 
 
 async def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
     inst_ids = tuple(args.inst_ids or SUPPORTED_INST_IDS)
     bars = tuple(args.bar or ("1m",))
+    strategies = tuple(getattr(args, "strategies", None) or STRATEGY_NAMES)
     start = parse_cli_datetime(args.start)
     end = parse_cli_datetime(args.end)
     cache_dir = Path(args.cache_dir)
@@ -92,8 +118,34 @@ async def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
                 data_client=data_client,
             )
             candidates = _candidate_grid(
+                strategies=strategies,
                 fast_windows=_parse_int_values(args.fast_window),
                 slow_windows=_parse_int_values(args.slow_window),
+                rsi_periods=_parse_int_values(getattr(args, "rsi_period", "14")),
+                oversold_values=_parse_decimal_values(getattr(args, "oversold_rsi", "30")),
+                overbought_values=_parse_decimal_values(getattr(args, "overbought_rsi", "70")),
+                breakout_lookbacks=_parse_int_values(getattr(args, "breakout_lookback", "20")),
+                breakout_atr_periods=_parse_int_values(
+                    getattr(args, "breakout_atr_period", "14")
+                ),
+                breakout_atr_multipliers=_parse_decimal_values(
+                    getattr(args, "breakout_atr_multiplier", "0.5")
+                ),
+                breakout_min_atr_pcts=_parse_decimal_values(
+                    getattr(args, "breakout_min_atr_pct", "0.001")
+                ),
+                stop_loss_values=_parse_optional_decimal_values(
+                    getattr(args, "stop_loss_bps", "none")
+                ),
+                take_profit_values=_parse_optional_decimal_values(
+                    getattr(args, "take_profit_bps", "none")
+                ),
+                trailing_stop_values=_parse_optional_decimal_values(
+                    getattr(args, "trailing_stop_bps", "none")
+                ),
+                max_bars_values=_parse_optional_int_values(
+                    getattr(args, "max_bars_in_trade", "none")
+                ),
                 trade_size=_trade_size_for(inst_id, args),
             )
             evaluations = evaluate_parameter_grid(inst_id, candles, candidates, config)
@@ -101,22 +153,19 @@ async def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
             for evaluation in evaluations:
                 if evaluation.accepted:
                     accepted_configs.append(
-                        {
-                            "inst_id": inst_id,
-                            "bar": bar,
-                            "strategy": "moving_average_crossover",
-                            "fast_window": evaluation.candidate.fast_window,
-                            "slow_window": evaluation.candidate.slow_window,
-                            "trade_size_base": str(evaluation.candidate.trade_size_base),
-                            "cooldown_seconds": args.cooldown_seconds,
-                            "source_report": "optimizer",
-                        }
+                        _accepted_config_payload(
+                            inst_id=inst_id,
+                            bar=bar,
+                            evaluation=evaluation,
+                            cooldown_seconds=args.cooldown_seconds,
+                        )
                     )
             reports.append(
                 {
                     "inst_id": inst_id,
                     "bar": bar,
                     "dataset": None if dataset is None else dataset.to_json_dict(),
+                    "strategies": list(strategies),
                     "candidate_count": len(candidate_payloads),
                     "accepted_count": sum(1 for item in candidate_payloads if item["accepted"]),
                     "candidates": candidate_payloads,
@@ -125,7 +174,7 @@ async def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
 
     payload = {
         "generated_at": datetime.now(tz=UTC).isoformat(),
-        "criteria": _criteria_payload(args),
+        "criteria": _criteria_payload(args, strategies=strategies),
         "reports": reports,
         "accepted_configs": accepted_configs,
     }
@@ -215,6 +264,9 @@ def _evaluation_config(args: argparse.Namespace, *, inst_ids: tuple[str, ...]) -
         min_walk_forward_pass_rate=Decimal(args.min_walk_forward_pass_rate),
         min_stable_neighbors=args.min_stable_neighbors,
         parameter_stability_radius=args.parameter_stability_radius,
+        min_calibration_signals=getattr(args, "min_calibration_signals", 1),
+        min_expected_edge_bps=Decimal(getattr(args, "min_expected_edge_bps", "0")),
+        expectancy_horizon_bars=getattr(args, "expectancy_horizon_bars", 1),
         risk_config=RiskConfig(
             allowed_inst_ids=inst_ids,
             cooldown_seconds=args.cooldown_seconds,
@@ -232,19 +284,153 @@ def _evaluation_config(args: argparse.Namespace, *, inst_ids: tuple[str, ...]) -
 
 def _candidate_grid(
     *,
+    strategies: tuple[str, ...],
     fast_windows: tuple[int, ...],
     slow_windows: tuple[int, ...],
+    rsi_periods: tuple[int, ...],
+    oversold_values: tuple[Decimal, ...],
+    overbought_values: tuple[Decimal, ...],
+    breakout_lookbacks: tuple[int, ...],
+    breakout_atr_periods: tuple[int, ...],
+    breakout_atr_multipliers: tuple[Decimal, ...],
+    breakout_min_atr_pcts: tuple[Decimal, ...],
+    stop_loss_values: tuple[Decimal | None, ...],
+    take_profit_values: tuple[Decimal | None, ...],
+    trailing_stop_values: tuple[Decimal | None, ...],
+    max_bars_values: tuple[int | None, ...],
     trade_size: Decimal,
-) -> tuple[MovingAverageCandidate, ...]:
-    candidates = [
-        MovingAverageCandidate(fast, slow, trade_size)
-        for fast in fast_windows
-        for slow in slow_windows
-        if slow > fast
-    ]
+) -> tuple[OptimizerCandidate, ...]:
+    exit_combinations = tuple(
+        product(stop_loss_values, take_profit_values, trailing_stop_values, max_bars_values)
+    )
+    candidates: list[OptimizerCandidate] = []
+    if "moving_average_crossover" in strategies:
+        for fast, slow, exits in product(fast_windows, slow_windows, exit_combinations):
+            if slow <= fast:
+                continue
+            stop, take, trailing, max_bars = exits
+            candidates.append(
+                StrategyCandidate(
+                    "moving_average_crossover",
+                    trade_size,
+                    fast_window=fast,
+                    slow_window=slow,
+                    stop_loss_bps=stop,
+                    take_profit_bps=take,
+                    trailing_stop_bps=trailing,
+                    max_bars_in_trade=max_bars,
+                )
+            )
+    if "rsi_mean_reversion" in strategies:
+        for period, oversold, overbought, exits in product(
+            rsi_periods,
+            oversold_values,
+            overbought_values,
+            exit_combinations,
+        ):
+            if oversold >= overbought:
+                continue
+            stop, take, trailing, max_bars = exits
+            candidates.append(
+                StrategyCandidate(
+                    "rsi_mean_reversion",
+                    trade_size,
+                    rsi_period=period,
+                    oversold_rsi=oversold,
+                    overbought_rsi=overbought,
+                    stop_loss_bps=stop,
+                    take_profit_bps=take,
+                    trailing_stop_bps=trailing,
+                    max_bars_in_trade=max_bars,
+                )
+            )
+    if "volatility_breakout" in strategies:
+        for lookback, atr_period, multiplier, min_atr_pct, exits in product(
+            breakout_lookbacks,
+            breakout_atr_periods,
+            breakout_atr_multipliers,
+            breakout_min_atr_pcts,
+            exit_combinations,
+        ):
+            stop, take, trailing, max_bars = exits
+            candidates.append(
+                StrategyCandidate(
+                    "volatility_breakout",
+                    trade_size,
+                    breakout_lookback=lookback,
+                    breakout_atr_period=atr_period,
+                    breakout_atr_multiplier=multiplier,
+                    breakout_min_atr_pct=min_atr_pct,
+                    stop_loss_bps=stop,
+                    take_profit_bps=take,
+                    trailing_stop_bps=trailing,
+                    max_bars_in_trade=max_bars,
+                )
+            )
     if not candidates:
-        raise ValueError("no valid MA candidates; every slow window must be greater than fast")
+        raise ValueError("no valid optimizer candidates")
     return tuple(candidates)
+
+
+def _accepted_config_payload(
+    *,
+    inst_id: str,
+    bar: str,
+    evaluation,
+    cooldown_seconds: int,
+) -> dict[str, Any]:
+    candidate = candidate_to_dict(evaluation.candidate)
+    edge = evaluation.expectancy.average_forward_return_after_cost_bps
+    strategy_name = candidate["strategy"]
+    env = {
+        "STRATEGY_NAME": strategy_name,
+        "OKX_INST_ID": inst_id,
+        "ENGINE_CANDLE_BAR": bar,
+    }
+    env.update(_env_parameters(candidate))
+    payload = {
+        "inst_id": inst_id,
+        "bar": bar,
+        "strategy": strategy_name,
+        "candidate": candidate,
+        "trade_size_base": candidate["trade_size_base"],
+        "cooldown_seconds": cooldown_seconds,
+        "expected_edge_bps": None if edge is None else str(edge),
+        "expected_edge_source": "historical_forward_return_after_costs",
+        "expectancy_calibration": evaluation.expectancy.to_dict(),
+        "optimizer_passed": True,
+        "anti_overfit_gates": {
+            "performance_gate": evaluation.gate.reason,
+            "walk_forward_gate_count": len(evaluation.walk_forward_gates),
+            "train_test_divergence_checked": True,
+            "baseline_outperformance_checked": True,
+            "parameter_stability_checked": True,
+        },
+        "rank_metrics": evaluation.to_dict()["rank_metrics"],
+        "env": env,
+        "source_report": "optimizer",
+    }
+    payload.update(candidate)
+    return payload
+
+
+def _env_parameters(candidate: dict[str, Any]) -> dict[str, str]:
+    mapping = {
+        "fast_window": "STRATEGY_FAST_WINDOW",
+        "slow_window": "STRATEGY_SLOW_WINDOW",
+        "rsi_period": "STRATEGY_RSI_PERIOD",
+        "oversold_rsi": "STRATEGY_OVERSOLD_RSI",
+        "overbought_rsi": "STRATEGY_OVERBOUGHT_RSI",
+        "breakout_lookback": "STRATEGY_BREAKOUT_LOOKBACK",
+        "breakout_atr_period": "STRATEGY_BREAKOUT_ATR_PERIOD",
+        "breakout_atr_multiplier": "STRATEGY_BREAKOUT_ATR_MULTIPLIER",
+        "breakout_min_atr_pct": "STRATEGY_BREAKOUT_MIN_ATR_PCT",
+        "stop_loss_bps": "LIVE_STOP_LOSS_BPS",
+        "take_profit_bps": "LIVE_TAKE_PROFIT_BPS",
+        "trailing_stop_bps": "LIVE_TRAILING_STOP_BPS",
+        "max_bars_in_trade": "LIVE_MAX_BARS_IN_TRADE",
+    }
+    return {env: str(candidate[key]) for key, env in mapping.items() if key in candidate}
 
 
 def _parse_int_values(raw: str) -> tuple[int, ...]:
@@ -260,18 +446,73 @@ def _parse_int_values(raw: str) -> tuple[int, ...]:
             values.append(int(token))
     unique = tuple(sorted(set(values)))
     if not unique:
-        raise ValueError("at least one window value is required")
+        raise ValueError("at least one integer value is required")
     return unique
+
+
+def _parse_optional_int_values(raw: str) -> tuple[int | None, ...]:
+    if _is_none_grid(raw):
+        return (None,)
+    values: list[int | None] = []
+    for token in _split_grid(raw):
+        if token.lower() in {"none", "null", "off", "0"}:
+            values.append(None)
+        elif ":" in token:
+            start, end = token.split(":", maxsplit=1)
+            values.extend(range(int(start), int(end) + 1))
+        else:
+            values.append(int(token))
+    return tuple(dict.fromkeys(values))
+
+
+def _parse_decimal_values(raw: str) -> tuple[Decimal, ...]:
+    values = tuple(Decimal(token) for token in _split_grid(raw))
+    if not values:
+        raise ValueError("at least one decimal value is required")
+    return tuple(sorted(set(values)))
+
+
+def _parse_optional_decimal_values(raw: str) -> tuple[Decimal | None, ...]:
+    if _is_none_grid(raw):
+        return (None,)
+    values: list[Decimal | None] = []
+    for token in _split_grid(raw):
+        if token.lower() in {"none", "null", "off", "0"}:
+            values.append(None)
+        else:
+            values.append(Decimal(token))
+    return tuple(dict.fromkeys(values))
+
+
+def _split_grid(raw: str) -> tuple[str, ...]:
+    return tuple(token.strip() for token in raw.split(",") if token.strip())
+
+
+def _is_none_grid(raw: str) -> bool:
+    tokens = _split_grid(raw)
+    return not tokens or all(token.lower() in {"none", "null", "off", "0"} for token in tokens)
 
 
 def _trade_size_for(inst_id: str, args: argparse.Namespace) -> Decimal:
     return Decimal(args.trade_size_eth if inst_id.startswith("ETH-") else args.trade_size_btc)
 
 
-def _criteria_payload(args: argparse.Namespace) -> dict[str, Any]:
+def _criteria_payload(args: argparse.Namespace, *, strategies: tuple[str, ...]) -> dict[str, Any]:
     return {
+        "strategies": list(strategies),
         "fast_window": args.fast_window,
         "slow_window": args.slow_window,
+        "rsi_period": getattr(args, "rsi_period", "14"),
+        "oversold_rsi": getattr(args, "oversold_rsi", "30"),
+        "overbought_rsi": getattr(args, "overbought_rsi", "70"),
+        "breakout_lookback": getattr(args, "breakout_lookback", "20"),
+        "breakout_atr_period": getattr(args, "breakout_atr_period", "14"),
+        "breakout_atr_multiplier": getattr(args, "breakout_atr_multiplier", "0.5"),
+        "breakout_min_atr_pct": getattr(args, "breakout_min_atr_pct", "0.001"),
+        "stop_loss_bps": getattr(args, "stop_loss_bps", "none"),
+        "take_profit_bps": getattr(args, "take_profit_bps", "none"),
+        "trailing_stop_bps": getattr(args, "trailing_stop_bps", "none"),
+        "max_bars_in_trade": getattr(args, "max_bars_in_trade", "none"),
         "cooldown_seconds": args.cooldown_seconds,
         "min_trades": args.min_trades,
         "min_net_pnl_usdt": args.min_net_pnl_usdt,
@@ -282,6 +523,9 @@ def _criteria_payload(args: argparse.Namespace) -> dict[str, Any]:
         "min_walk_forward_pass_rate": args.min_walk_forward_pass_rate,
         "min_stable_neighbors": args.min_stable_neighbors,
         "parameter_stability_radius": args.parameter_stability_radius,
+        "min_calibration_signals": getattr(args, "min_calibration_signals", 1),
+        "min_expected_edge_bps": getattr(args, "min_expected_edge_bps", "0"),
+        "expectancy_horizon_bars": getattr(args, "expectancy_horizon_bars", 1),
         "require_baseline_outperformance": True,
         "cost_model": {
             "taker_fee_bps": args.taker_fee_bps,

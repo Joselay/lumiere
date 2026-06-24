@@ -95,6 +95,8 @@ def test_optimizer_cli_smoke_writes_offline_artifacts(tmp_path, monkeypatch, cap
             "BTC-USDT",
             "--bar",
             "1m",
+            "--strategy",
+            "moving_average_crossover",
             "--start",
             start.isoformat(),
             "--end",

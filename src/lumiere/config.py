@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     paper_ledger_path: str = "data/paper_trading.jsonl"
     attribution_ledger_path: str = "data/attribution.jsonl"
     risk_state_path: str = "data/risk_state.json"
+    optimizer_accepted_candidates_path: str = (
+        "reports/strategy_optimization/accepted_candidates.json"
+    )
     performance_gate_min_trades: int = 20
     performance_gate_min_net_pnl_usdt: Decimal = Decimal("0")
     performance_gate_max_drawdown_usdt: Decimal = Decimal("0")

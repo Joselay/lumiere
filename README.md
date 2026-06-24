@@ -74,17 +74,22 @@ uv run lumiere-backtest --offline --bar 1m --start 2026-01-01T00:00:00Z --end 20
 
 The JSON report includes full-period metrics plus chronological train/validation/test and rolling walk-forward reports. Each split shows in-sample vs out-of-sample net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, trade count, win rate, profit factor, Sharpe/Sortino when available, rejected order count, and buy-and-hold/no-trade baseline comparisons.
 
-Optimize moving-average candidates with the same cached data and cost assumptions:
+Optimize all strategy families with the same cached data and cost assumptions:
 
 ```bash
 uv run lumiere-optimize \
-  --inst-id BTC-USDT --bar 1m \
+  --inst-id BTC-USDT --bar 1m --bar 5m \
   --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z \
+  --strategy moving_average_crossover --strategy rsi_mean_reversion --strategy volatility_breakout \
   --fast-window 3:12 --slow-window 10:40 \
-  --min-trades 20 --min-walk-forward-windows 3 --min-stable-neighbors 1
+  --rsi-period 7,14,21 --oversold-rsi 25,30,35 --overbought-rsi 65,70,75 \
+  --breakout-lookback 10,20,40 --breakout-atr-period 7,14,21 \
+  --stop-loss-bps none,100 --take-profit-bps none,200 --max-bars-in-trade none,30 \
+  --min-trades 20 --min-walk-forward-windows 3 --min-stable-neighbors 1 \
+  --min-calibration-signals 10 --min-expected-edge-bps 1
 ```
 
-The optimizer writes `reports/strategy_optimization/optimizer_report.json` and `accepted_candidates.json`. Candidates are sorted by out-of-sample net PnL, drawdown, profit factor, Sharpe/Sortino, trade count, and win rate, and are rejected unless they pass out-of-sample gates, beat no-trade and buy-and-hold baselines, avoid train/test divergence, and satisfy any configured walk-forward and parameter-stability gates.
+The optimizer writes `reports/strategy_optimization/optimizer_report.json` and `accepted_candidates.json`. It searches moving-average, RSI mean-reversion, and volatility-breakout parameter grids across symbols, bars/timeframes, per-symbol sizing, and optional stop-loss/take-profit/trailing/time exits. Each candidate includes an empirical `expectancy_calibration` derived from historical conditional forward returns after modeled fees, spread, slippage, and market impact; accepted configs include `.env`-ready settings plus `expected_edge_bps`, `expected_edge_source=historical_forward_return_after_costs`, and `optimizer_passed=true`. Candidates are sorted with penalties for turnover, tail loss, drawdown duration, drawdown, profit factor, Sharpe/Sortino, trade count, win rate, and parameter instability, and are rejected unless they pass out-of-sample gates, beat no-trade and buy-and-hold baselines, avoid train/test divergence, satisfy walk-forward and parameter-stability gates, and have a calibrated positive expected edge. Live/demo startup risk audit requires the current strategy to match an accepted optimizer candidate before trading.
 
 Before increasing size, build the long-horizon evidence matrix across BTC/ETH, 1m/5m/15m/1H bars, all strategy modules, chronological train/validation/test splits, rolling walk-forward windows, and labeled market regimes:
 
