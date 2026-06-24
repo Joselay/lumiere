@@ -109,6 +109,10 @@ OKX_INST_IDS=BTC-USDT,ETH-USDT
 /panic        stop the engine and cancel open orders
 ```
 
+## Operations
+
+Before increasing size, follow the staged [go-live profitability runbook](docs/go_live_runbook.md). It defines go/no-go thresholds, rollback rules, observation periods, and the `uv run lumiere-evidence` packet required for promotion decisions.
+
 ## Development
 
 ```bash

@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 lumiere-bot = "lumiere.main:run"
 lumiere-backtest = "lumiere.backtest_cli:main"
+lumiere-evidence = "lumiere.evidence_cli:main"
 lumiere-optimize = "lumiere.optimizer_cli:main"
 
 [dependency-groups]
