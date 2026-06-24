@@ -58,7 +58,16 @@ Run a reproducible BTC/ETH report using OKX historical candle access through `py
 uv run lumiere-backtest --inst-id BTC-USDT --inst-id ETH-USDT --bar 1m --limit 300
 ```
 
-The JSON report includes net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, win rate, profit factor, Sharpe/Sortino when available, rejected order count, and buy-and-hold/no-trade baselines.
+For longer-horizon evidence, request an inclusive date range. The backtester paginates OKX history, saves a checksummed CSV plus metadata under `data/historical`, and can rerun fully offline from that cache:
+
+```bash
+uv run lumiere-backtest \
+  --inst-id BTC-USDT --inst-id ETH-USDT \
+  --bar 1m --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z
+uv run lumiere-backtest --offline --bar 1m --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z
+```
+
+The JSON report includes full-period metrics plus chronological train/validation/test and rolling walk-forward reports. Each split shows in-sample vs out-of-sample net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, trade count, win rate, profit factor, Sharpe/Sortino when available, rejected order count, and buy-and-hold/no-trade baseline comparisons.
 
 ## Symbols
 

@@ -11,6 +11,8 @@ from lumiere.strategy_evaluation import (
     MovingAverageCandidate,
     evaluate_parameter_grid,
     train_test_split,
+    train_validation_test_split,
+    walk_forward_splits,
 )
 
 
@@ -33,6 +35,35 @@ def test_train_test_split_preserves_chronological_order() -> None:
 
     assert [candle.close for candle in train] == [1, 2]
     assert [candle.close for candle in test] == [3, 4]
+
+
+def test_train_validation_test_split_boundaries_are_chronological_and_disjoint() -> None:
+    train, validation, test = train_validation_test_split(
+        candles(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]),
+        train_fraction=Decimal("0.5"),
+        validation_fraction=Decimal("0.2"),
+    )
+
+    assert [candle.close for candle in train.candles] == [1, 2, 3, 4, 5]
+    assert [candle.close for candle in validation.candles] == [6, 7]
+    assert [candle.close for candle in test.candles] == [8, 9, 10]
+    assert train.candles[-1].ts < validation.candles[0].ts < test.candles[0].ts
+
+
+def test_walk_forward_splits_roll_without_lookahead() -> None:
+    windows = walk_forward_splits(
+        candles(["1", "2", "3", "4", "5", "6"]),
+        train_size=3,
+        test_size=2,
+        step_size=1,
+    )
+
+    assert len(windows) == 2
+    assert [candle.close for candle in windows[0].train] == [1, 2, 3]
+    assert [candle.close for candle in windows[0].test] == [4, 5]
+    assert [candle.close for candle in windows[1].train] == [2, 3, 4]
+    assert [candle.close for candle in windows[1].test] == [5, 6]
+    assert all(window.train[-1].ts < window.test[0].ts for window in windows)
 
 
 def test_parameter_grid_marks_candidates_not_passing_test_gate_as_rejected() -> None:
