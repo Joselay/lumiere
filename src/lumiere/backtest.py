@@ -8,13 +8,15 @@ from typing import Any
 from lumiere.ledger import (
     BASIS_POINTS,
     EquityPoint,
+    ExposurePoint,
     PnlMetrics,
     TradeFill,
     build_pnl_metrics,
+    max_drawdown_duration_bars,
     max_drawdown_usdt,
     risk_adjusted_ratios,
 )
-from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position
+from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position, StrategyDecision
 from lumiere.strategy import TradingStrategy
 
 
@@ -72,10 +74,19 @@ class CostModel:
 class BacktestConfig:
     starting_equity_usdt: Decimal = Decimal("1000")
     cost_model: CostModel = CostModel()
+    stop_loss_bps: Decimal | None = None
+    take_profit_bps: Decimal | None = None
+    trailing_stop_bps: Decimal | None = None
+    max_bars_in_trade: int | None = None
 
     def __post_init__(self) -> None:
         if self.starting_equity_usdt <= 0:
             raise ValueError("starting_equity_usdt must be positive")
+        for value in (self.stop_loss_bps, self.take_profit_bps, self.trailing_stop_bps):
+            if value is not None and value <= 0:
+                raise ValueError("exit bps values must be positive when configured")
+        if self.max_bars_in_trade is not None and self.max_bars_in_trade <= 0:
+            raise ValueError("max_bars_in_trade must be positive when configured")
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +135,11 @@ class Backtester:
         position = Decimal("0")
         fills: list[TradeFill] = []
         equity_curve: list[EquityPoint] = []
+        exposure_curve: list[ExposurePoint] = []
         attempted_orders = 0
+        entry_price: Decimal | None = None
+        entry_index: int | None = None
+        highest_since_entry: Decimal | None = None
         rejected_orders = 0
         cost_model = self.config.cost_model
         inst_id = self.strategy.config.inst_id
@@ -136,7 +151,18 @@ class Backtester:
                 positions=((Position(inst_id=inst_id, size_btc=position),) if position > 0 else ()),
                 performance_gate_passed=True,
             )
-            decision = self.strategy.decide(list(ordered_candles[: index + 1]), account)
+            exit_decision = self._exit_decision(
+                candle,
+                position,
+                entry_price,
+                entry_index,
+                index,
+                highest_since_entry,
+            )
+            decision = exit_decision or self.strategy.decide(
+                list(ordered_candles[: index + 1]),
+                account,
+            )
             if decision.action in {DecisionAction.BUY, DecisionAction.SELL}:
                 attempted_orders += 1
                 if cost_model.is_rejected(attempted_orders):
@@ -150,11 +176,21 @@ class Backtester:
                         if fill.side is DecisionAction.BUY:
                             cash -= fill.notional_usdt + fill.fee_cost_usdt()
                             position += fill.size_base
+                            entry_price = fill.price if entry_price is None else entry_price
+                            entry_index = index if entry_index is None else entry_index
+                            highest_since_entry = candle.high
                         else:
                             cash += fill.notional_usdt - fill.fee_cost_usdt()
                             position -= min(position, fill.size_base)
+                            if position <= 0:
+                                entry_price = None
+                                entry_index = None
+                                highest_since_entry = None
+            if position > 0:
+                highest_since_entry = max(highest_since_entry or candle.high, candle.high)
 
             equity_curve.append(EquityPoint(candle.ts, cash + position * candle.close))
+            exposure_curve.append(ExposurePoint(candle.ts, position * candle.close))
 
         metrics = build_pnl_metrics(
             fills,
@@ -170,6 +206,8 @@ class Backtester:
             sharpe=sharpe,
             sortino=sortino,
             equity_curve=tuple(equity_curve),
+            max_drawdown_duration_bars=max_drawdown_duration_bars(tuple(equity_curve)),
+            exposure_curve=tuple(exposure_curve),
         )
         return BacktestReport(
             inst_id=inst_id,
@@ -187,6 +225,63 @@ class Backtester:
             rejected_order_count=rejected_orders,
             assumptions=cost_model.assumptions(),
         )
+
+    def _exit_decision(
+        self,
+        candle: MarketCandle,
+        position: Decimal,
+        entry_price: Decimal | None,
+        entry_index: int | None,
+        index: int,
+        highest_since_entry: Decimal | None,
+    ) -> StrategyDecision | None:
+        if position <= 0 or entry_price is None:
+            return None
+        if self.config.stop_loss_bps is not None:
+            stop_price = entry_price * (
+                Decimal("1") - self.config.stop_loss_bps / Decimal("10000")
+            )
+            if candle.close <= stop_price:
+                return StrategyDecision(
+                    DecisionAction.SELL,
+                    self.strategy.config.inst_id,
+                    position,
+                    "stop_loss",
+                )
+        if self.config.take_profit_bps is not None:
+            take_profit_price = entry_price * (
+                Decimal("1") + self.config.take_profit_bps / Decimal("10000")
+            )
+            if candle.close >= take_profit_price:
+                return StrategyDecision(
+                    DecisionAction.SELL,
+                    self.strategy.config.inst_id,
+                    position,
+                    "take_profit",
+                )
+        if self.config.trailing_stop_bps is not None and highest_since_entry is not None:
+            trailing_stop = highest_since_entry * (
+                Decimal("1") - self.config.trailing_stop_bps / Decimal("10000")
+            )
+            if candle.close <= trailing_stop:
+                return StrategyDecision(
+                    DecisionAction.SELL,
+                    self.strategy.config.inst_id,
+                    position,
+                    "trailing_stop",
+                )
+        if (
+            self.config.max_bars_in_trade is not None
+            and entry_index is not None
+            and index - entry_index >= self.config.max_bars_in_trade
+        ):
+            return StrategyDecision(
+                DecisionAction.SELL,
+                self.strategy.config.inst_id,
+                position,
+                "time_in_trade_exit",
+            )
+        return None
 
     def _execute_decision(
         self,

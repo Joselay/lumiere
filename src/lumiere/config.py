@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     risk_max_daily_trades: int = 0
     risk_max_spread_bps: Decimal = Decimal("0")
     risk_min_expected_edge_buffer_bps: Decimal = Decimal("0")
+    risk_max_risk_per_trade_pct: Decimal = Decimal("0")
+    risk_max_portfolio_exposure_pct: Decimal = Decimal("1")
+    risk_drawdown_derisk_threshold_usdt: Decimal = Decimal("0")
+    risk_drawdown_derisk_multiplier: Decimal = Decimal("0.5")
     risk_require_performance_gate: bool = False
     paper_ledger_path: str = "data/paper_trading.jsonl"
     performance_gate_min_trades: int = 20
@@ -200,6 +204,10 @@ class Settings(BaseSettings):
             max_daily_trades=self.risk_max_daily_trades if self.risk_max_daily_trades > 0 else None,
             max_spread_bps=_positive_decimal_or_none(self.risk_max_spread_bps),
             min_expected_edge_buffer_bps=self.risk_min_expected_edge_buffer_bps,
+            max_risk_per_trade_pct=self.risk_max_risk_per_trade_pct,
+            max_portfolio_exposure_pct=self.risk_max_portfolio_exposure_pct,
+            drawdown_derisk_threshold_usdt=self.risk_drawdown_derisk_threshold_usdt,
+            drawdown_derisk_multiplier=self.risk_drawdown_derisk_multiplier,
             performance_gate_required=self.risk_require_performance_gate,
         )
 

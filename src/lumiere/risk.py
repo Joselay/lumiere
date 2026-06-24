@@ -24,6 +24,10 @@ class RiskConfig:
     max_spread_bps: Decimal | None = None
     min_expected_edge_buffer_bps: Decimal = Decimal("0")
     performance_gate_required: bool = False
+    max_risk_per_trade_pct: Decimal = Decimal("0")
+    max_portfolio_exposure_pct: Decimal = Decimal("1")
+    drawdown_derisk_threshold_usdt: Decimal = Decimal("0")
+    drawdown_derisk_multiplier: Decimal = Decimal("0.5")
 
     def __post_init__(self) -> None:
         if self.demo_flag != "1":
@@ -50,6 +54,14 @@ class RiskConfig:
             raise ValueError("max_spread_bps must be positive when configured")
         if self.min_expected_edge_buffer_bps < 0:
             raise ValueError("min_expected_edge_buffer_bps cannot be negative")
+        if self.max_risk_per_trade_pct < 0:
+            raise ValueError("max_risk_per_trade_pct cannot be negative")
+        if self.max_portfolio_exposure_pct <= 0:
+            raise ValueError("max_portfolio_exposure_pct must be positive")
+        if self.drawdown_derisk_threshold_usdt < 0:
+            raise ValueError("drawdown_derisk_threshold_usdt cannot be negative")
+        if self.drawdown_derisk_multiplier <= 0 or self.drawdown_derisk_multiplier > 1:
+            raise ValueError("drawdown_derisk_multiplier must be between 0 and 1")
         for inst_id, value in (self.max_position_by_inst_id or {}).items():
             if inst_id not in self.allowed_inst_ids:
                 raise ValueError(f"max position configured for disallowed instrument: {inst_id}")
@@ -169,6 +181,30 @@ class RiskManager:
             return RiskDecision(False, "non_positive_order_size")
         return RiskDecision(True, "risk_checks_passed")
 
+    def clamp_order_size(self, decision: StrategyDecision, account: AccountSnapshot) -> Decimal:
+        if decision.action is DecisionAction.HOLD:
+            return Decimal("0")
+        size = decision.size_btc
+        price = _decision_price(decision)
+        if price is not None:
+            max_exposure = account.equity_usdt * self.config.max_portfolio_exposure_pct
+            max_size_by_exposure = max_exposure / price
+            size = min(size, max_size_by_exposure)
+            stop_loss_bps = _input_decimal(decision.inputs, "stop_loss_bps")
+            volatility_bps = _input_decimal(decision.inputs, "volatility_bps")
+            risk_bps = stop_loss_bps or volatility_bps
+            if self.config.max_risk_per_trade_pct > 0 and risk_bps is not None and risk_bps > 0:
+                risk_budget = account.equity_usdt * self.config.max_risk_per_trade_pct
+                risk_per_unit = price * risk_bps / Decimal("10000")
+                if risk_per_unit > 0:
+                    size = min(size, risk_budget / risk_per_unit)
+        if (
+            self.config.drawdown_derisk_threshold_usdt > 0
+            and account.max_drawdown_usdt >= self.config.drawdown_derisk_threshold_usdt
+        ):
+            size *= self.config.drawdown_derisk_multiplier
+        return max(size, Decimal("0"))
+
     def validate_order(self, order: OrderRequest) -> None:
         if self.config.demo_flag != "1":
             raise ValueError("OKX demo guard failed: refusing order when OKX_FLAG != '1'")
@@ -183,7 +219,18 @@ class RiskManager:
 
 
 def _expected_edge_bps(inputs: Mapping[str, object]) -> Decimal | None:
-    raw = inputs.get("expected_edge_bps")
+    return _input_decimal(inputs, "expected_edge_bps")
+
+
+def _decision_price(decision: StrategyDecision) -> Decimal | None:
+    return _input_decimal(decision.inputs, "decision_price") or _input_decimal(
+        decision.inputs,
+        "price",
+    )
+
+
+def _input_decimal(inputs: Mapping[str, object], key: str) -> Decimal | None:
+    raw = inputs.get(key)
     if raw in {None, ""}:
         return None
     return Decimal(str(raw))

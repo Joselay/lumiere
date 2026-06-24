@@ -35,6 +35,10 @@ class EvaluationConfig:
     train_fraction: Decimal = Decimal("0.6")
     starting_equity_usdt: Decimal = Decimal("1000")
     cost_model: CostModel = CostModel()
+    stop_loss_bps: Decimal | None = None
+    take_profit_bps: Decimal | None = None
+    trailing_stop_bps: Decimal | None = None
+    max_bars_in_trade: int | None = None
     performance_gate: PerformanceGateConfig = PerformanceGateConfig(min_trades=1)
     max_train_test_pnl_ratio: Decimal = Decimal("4")
     require_baseline_outperformance: bool = True
@@ -377,6 +381,10 @@ def _run_candidate(
         BacktestConfig(
             starting_equity_usdt=config.starting_equity_usdt,
             cost_model=config.cost_model,
+            stop_loss_bps=config.stop_loss_bps,
+            take_profit_bps=config.take_profit_bps,
+            trailing_stop_bps=config.trailing_stop_bps,
+            max_bars_in_trade=config.max_bars_in_trade,
         ),
     ).run(candles)
 

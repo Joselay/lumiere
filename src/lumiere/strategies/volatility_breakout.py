@@ -97,6 +97,8 @@ class VolatilityBreakoutStrategy:
             "allowed_regimes": self.allowed_regimes,
             "regime": "trending_high_volatility" if volatility_ok else "low_volatility",
             "spread_liquidity_ok": spread_ok,
+            "decision_price": str(latest.close),
+            "volatility_bps": str(atr_pct * Decimal("10000")),
             "expected_edge_bps": str(atr_pct * Decimal("10000")),
         }
         if not spread_ok:

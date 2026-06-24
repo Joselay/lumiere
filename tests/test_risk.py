@@ -160,6 +160,44 @@ def test_risk_blocks_drawdown_daily_trade_limit_and_spread_guard() -> None:
     )
 
 
+def test_risk_clamps_target_exposure_to_portfolio_and_volatility_budget() -> None:
+    risk = RiskManager(
+        RiskConfig(
+            max_portfolio_exposure_pct=Decimal("0.5"),
+            max_risk_per_trade_pct=Decimal("0.01"),
+        )
+    )
+    decision = buy(size="10")
+    decision.inputs["decision_price"] = "100"
+    decision.inputs["volatility_bps"] = "1000"
+
+    clamped = risk.clamp_order_size(decision, account())
+
+    assert clamped == Decimal("1.00")
+
+
+def test_risk_drawdown_derisking_reduces_size_after_losses() -> None:
+    risk = RiskManager(
+        RiskConfig(
+            drawdown_derisk_threshold_usdt=Decimal("10"),
+            drawdown_derisk_multiplier=Decimal("0.25"),
+        )
+    )
+    decision = buy(size="1")
+    decision.inputs["decision_price"] = "100"
+
+    clamped = risk.clamp_order_size(
+        decision,
+        AccountSnapshot(
+            equity_usdt=Decimal("1000"),
+            available_usdt=Decimal("1000"),
+            max_drawdown_usdt=Decimal("10"),
+        ),
+    )
+
+    assert clamped == Decimal("0.25")
+
+
 def test_risk_blocks_when_expected_edge_is_below_estimated_cost() -> None:
     risk = RiskManager(RiskConfig(min_expected_edge_buffer_bps=Decimal("1")))
     low_edge = buy()

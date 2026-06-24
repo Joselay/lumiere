@@ -63,6 +63,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slippage-bps", default="5")
     parser.add_argument("--market-impact-bps", default="0")
     parser.add_argument("--reject-every-n-orders", type=int, default=0)
+    parser.add_argument("--stop-loss-bps", default="0")
+    parser.add_argument("--take-profit-bps", default="0")
+    parser.add_argument("--trailing-stop-bps", default="0")
+    parser.add_argument("--max-bars-in-trade", type=int, default=0)
     parser.add_argument("--train-fraction", default="0.6")
     parser.add_argument("--validation-fraction", default="0.2")
     parser.add_argument("--walk-forward-train-size", type=int, default=0)
@@ -89,6 +93,10 @@ async def run_backtest(args: argparse.Namespace) -> list[dict]:
         train_fraction=Decimal(args.train_fraction),
         starting_equity_usdt=Decimal(args.starting_equity_usdt),
         cost_model=cost_model,
+        stop_loss_bps=_positive_decimal_or_none(args.stop_loss_bps),
+        take_profit_bps=_positive_decimal_or_none(args.take_profit_bps),
+        trailing_stop_bps=_positive_decimal_or_none(args.trailing_stop_bps),
+        max_bars_in_trade=args.max_bars_in_trade or None,
     )
     reports = []
     for inst_id in inst_ids:
@@ -283,8 +291,17 @@ def _run_strategy_report(
         BacktestConfig(
             starting_equity_usdt=config.starting_equity_usdt,
             cost_model=config.cost_model,
+            stop_loss_bps=config.stop_loss_bps,
+            take_profit_bps=config.take_profit_bps,
+            trailing_stop_bps=config.trailing_stop_bps,
+            max_bars_in_trade=config.max_bars_in_trade,
         ),
     ).run(candles)
+
+
+def _positive_decimal_or_none(raw: str) -> Decimal | None:
+    value = Decimal(raw)
+    return value if value > 0 else None
 
 
 def main() -> None:

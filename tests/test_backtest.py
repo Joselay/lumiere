@@ -45,6 +45,29 @@ def test_backtest_report_includes_net_pnl_after_fee_spread_and_slippage() -> Non
     assert report.assumptions["taker_fee_bps"] == "10"
 
 
+def test_backtest_reports_risk_of_ruin_metrics_and_exposure_curve() -> None:
+    strategy = MovingAverageCrossoverStrategy(
+        MovingAverageCrossoverConfig(fast_window=1, slow_window=2, trade_size_btc=Decimal("1"))
+    )
+    report = Backtester(
+        strategy,
+        BacktestConfig(
+            starting_equity_usdt=Decimal("1000"),
+            cost_model=CostModel(
+                taker_fee_bps=Decimal("0"),
+                spread_bps=Decimal("0"),
+                slippage_bps=Decimal("0"),
+            ),
+            max_bars_in_trade=1,
+        ),
+    ).run(candles(["100", "101", "90", "91", "80"]))
+
+    assert report.metrics.largest_loss_usdt >= 0
+    assert report.metrics.losing_streak >= 0
+    assert report.metrics.max_drawdown_duration_bars >= 0
+    assert len(report.metrics.exposure_curve) == 5
+
+
 def test_backtest_models_rejected_orders() -> None:
     strategy = MovingAverageCrossoverStrategy(
         MovingAverageCrossoverConfig(fast_window=2, slow_window=3, trade_size_btc=Decimal("1"))

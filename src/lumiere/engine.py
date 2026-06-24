@@ -259,10 +259,11 @@ class TradingEngine:
                     self.risk_manager.record_success()
                     continue
 
+                order_size = self.risk_manager.clamp_order_size(decision, account)
                 order = OrderRequest(
                     inst_id=decision.inst_id,
                     side=decision.action,
-                    size_btc=decision.size_btc,
+                    size_btc=order_size,
                     td_mode=self.config.td_mode,
                     order_type=self.config.order_type,
                 )

@@ -87,6 +87,10 @@ class MovingAverageCrossoverStrategy:
             "effective_position_base": str(position),
             "fast_window": self.config.fast_window,
             "slow_window": self.config.slow_window,
+            "decision_price": str(candles[-1].close),
+            "volatility_bps": str(abs(fast_ma - slow_ma) / slow_ma * Decimal("10000"))
+            if slow_ma != 0
+            else "0",
             "expected_edge_bps": str(abs(fast_ma - slow_ma) / slow_ma * Decimal("10000"))
             if slow_ma != 0
             else "0",

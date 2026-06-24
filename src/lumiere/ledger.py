@@ -67,6 +67,12 @@ class EquityPoint:
 
 
 @dataclass(frozen=True, slots=True)
+class ExposurePoint:
+    ts: datetime
+    exposure_usdt: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class PnlMetrics:
     starting_equity_usdt: Decimal
     ending_equity_usdt: Decimal
@@ -82,6 +88,10 @@ class PnlMetrics:
     sharpe: float | None
     sortino: float | None
     equity_curve: tuple[EquityPoint, ...]
+    largest_loss_usdt: Decimal = Decimal("0")
+    losing_streak: int = 0
+    max_drawdown_duration_bars: int = 0
+    exposure_curve: tuple[ExposurePoint, ...] = ()
 
     def to_dict(self) -> dict[str, str | int | float | None | list[dict[str, str]]]:
         return {
@@ -101,6 +111,13 @@ class PnlMetrics:
             "equity_curve": [
                 {"ts": point.ts.isoformat(), "equity_usdt": str(point.equity_usdt)}
                 for point in self.equity_curve
+            ],
+            "largest_loss_usdt": str(self.largest_loss_usdt),
+            "losing_streak": self.losing_streak,
+            "max_drawdown_duration_bars": self.max_drawdown_duration_bars,
+            "exposure_curve": [
+                {"ts": point.ts.isoformat(), "exposure_usdt": str(point.exposure_usdt)}
+                for point in self.exposure_curve
             ],
         }
 
@@ -129,6 +146,9 @@ def build_pnl_metrics(
     winning_closes = 0
     gross_profit = Decimal("0")
     gross_loss = Decimal("0")
+    largest_loss = Decimal("0")
+    losing_streak = 0
+    max_losing_streak = 0
     curve: list[EquityPoint] = []
 
     for fill in sorted_fills:
@@ -158,8 +178,13 @@ def build_pnl_metrics(
             if close_pnl > 0:
                 winning_closes += 1
                 gross_profit += close_pnl
+                losing_streak = 0
             elif close_pnl < 0:
-                gross_loss += abs(close_pnl)
+                loss = abs(close_pnl)
+                gross_loss += loss
+                largest_loss = max(largest_loss, loss)
+                losing_streak += 1
+                max_losing_streak = max(max_losing_streak, losing_streak)
 
         curve.append(EquityPoint(fill.ts, _equity(cash, size_by_inst, last_price_by_inst)))
 
@@ -194,6 +219,9 @@ def build_pnl_metrics(
         sharpe=sharpe,
         sortino=sortino,
         equity_curve=tuple(curve),
+        largest_loss_usdt=largest_loss,
+        losing_streak=max_losing_streak,
+        max_drawdown_duration_bars=max_drawdown_duration_bars(tuple(curve)),
     )
 
 
@@ -264,6 +292,20 @@ def max_drawdown_usdt(curve: tuple[EquityPoint, ...]) -> Decimal:
         if drawdown > max_drawdown:
             max_drawdown = drawdown
     return max_drawdown
+
+
+def max_drawdown_duration_bars(curve: tuple[EquityPoint, ...]) -> int:
+    peak: Decimal | None = None
+    current_duration = 0
+    max_duration = 0
+    for point in curve:
+        if peak is None or point.equity_usdt >= peak:
+            peak = point.equity_usdt
+            current_duration = 0
+            continue
+        current_duration += 1
+        max_duration = max(max_duration, current_duration)
+    return max_duration
 
 
 def risk_adjusted_ratios(curve: tuple[EquityPoint, ...]) -> tuple[float | None, float | None]:
