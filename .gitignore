@@ -16,6 +16,8 @@ build/
 
 # Runtime logs/state
 logs/
+data/
+reports/
 *.log
 *.pid
 state.json
