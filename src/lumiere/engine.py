@@ -11,6 +11,7 @@ from typing import Protocol
 import structlog
 
 from lumiere.attribution import AttributionLedger
+from lumiere.execution import prepare_execution_plan
 from lumiere.ledger import TradeFill
 from lumiere.models import (
     AccountSnapshot,
@@ -248,7 +249,13 @@ class TradingEngine:
                 self._record_paper_decision(strategy, candles)
                 self._record_attribution_decision(strategy.name, decision, candles)
                 self._last_decision = f"{decision.inst_id}:{decision.action.value}"
-                risk_decision = self.risk_manager.assess(decision, account)
+                execution_plan = prepare_execution_plan(
+                    decision,
+                    account,
+                    self.risk_manager,
+                    mark_price=candles[-1].close,
+                )
+                risk_decision = execution_plan.risk_decision
                 self._record_attribution_risk(decision, risk_decision, candles)
                 self._last_risk_reason = risk_decision.reason
                 decision_log = log.debug if decision.action is DecisionAction.HOLD else log.info
@@ -290,11 +297,10 @@ class TradingEngine:
                     self.risk_manager.record_success()
                     continue
 
-                order_size = self.risk_manager.clamp_order_size(decision, account)
                 order = OrderRequest(
                     inst_id=decision.inst_id,
                     side=decision.action,
-                    size_btc=order_size,
+                    size_btc=execution_plan.clamped_size_btc,
                     td_mode=self.config.td_mode,
                     order_type=self.config.order_type,
                 )

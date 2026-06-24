@@ -12,6 +12,7 @@ from lumiere.paper_gate import (
     PerformanceGateDecision,
     assess_report,
 )
+from lumiere.risk import RiskConfig
 from lumiere.strategy import MovingAverageCrossoverConfig, MovingAverageCrossoverStrategy
 
 
@@ -48,6 +49,7 @@ class EvaluationConfig:
     min_walk_forward_pass_rate: Decimal = Decimal("0.5")
     min_stable_neighbors: int = 0
     parameter_stability_radius: int = 1
+    risk_config: RiskConfig | None = None
 
     def __post_init__(self) -> None:
         if self.train_fraction <= 0 or self.train_fraction >= 1:
@@ -337,6 +339,10 @@ def rank_metrics(report: BacktestReport) -> dict[str, str | int | float | None]:
         "win_rate": str(metrics.win_rate),
         "buy_and_hold_pnl_usdt": str(report.buy_and_hold_pnl_usdt),
         "no_trade_pnl_usdt": str(report.no_trade_pnl_usdt),
+        "risk_rejection_count": report.risk_rejection_count,
+        "blocked_signal_opportunity_cost_usdt": str(
+            report.blocked_signal_opportunity_cost_usdt
+        ),
         **baseline_comparison(report),
     }
 
@@ -385,6 +391,7 @@ def _run_candidate(
             take_profit_bps=config.take_profit_bps,
             trailing_stop_bps=config.trailing_stop_bps,
             max_bars_in_trade=config.max_bars_in_trade,
+            risk_config=config.risk_config,
         ),
     ).run(candles)
 

@@ -184,6 +184,7 @@ class Settings(BaseSettings):
                 ),
             ),
             max_evidence_age=timedelta(hours=self.performance_gate_max_evidence_age_hours),
+            risk_config=self.risk_config(),
         )
 
     def risk_config(self) -> RiskConfig:

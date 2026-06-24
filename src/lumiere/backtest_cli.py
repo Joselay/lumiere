@@ -17,6 +17,7 @@ from lumiere.historical_data import (
     save_dataset,
 )
 from lumiere.models import MarketCandle
+from lumiere.risk import RiskConfig
 from lumiere.strategy import TradingStrategy
 from lumiere.strategy_evaluation import (
     EvaluationConfig,
@@ -97,6 +98,18 @@ async def run_backtest(args: argparse.Namespace) -> list[dict]:
         take_profit_bps=_positive_decimal_or_none(args.take_profit_bps),
         trailing_stop_bps=_positive_decimal_or_none(args.trailing_stop_bps),
         max_bars_in_trade=args.max_bars_in_trade or None,
+        risk_config=RiskConfig(
+            allowed_inst_ids=inst_ids,
+            cooldown_seconds=0,
+            max_position_by_inst_id={
+                inst_id: Decimal("0.05" if inst_id.startswith("ETH-") else "0.005")
+                for inst_id in inst_ids
+            },
+            min_order_by_inst_id={
+                inst_id: Decimal("0.0001" if inst_id.startswith("ETH-") else "0.00001")
+                for inst_id in inst_ids
+            },
+        ),
     )
     reports = []
     for inst_id in inst_ids:

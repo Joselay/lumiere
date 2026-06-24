@@ -20,6 +20,7 @@ from lumiere.historical_data import (
 )
 from lumiere.models import MarketCandle
 from lumiere.paper_gate import PerformanceGateConfig
+from lumiere.risk import RiskConfig
 from lumiere.strategy_evaluation import (
     EvaluationConfig,
     MovingAverageCandidate,
@@ -73,7 +74,7 @@ async def run_optimizer(args: argparse.Namespace) -> dict[str, Any]:
     data_client = None if args.offline else OKXHistoricalDataClient(flag="1")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    config = _evaluation_config(args)
+    config = _evaluation_config(args, inst_ids=inst_ids)
 
     reports: list[dict[str, Any]] = []
     accepted_configs: list[dict[str, Any]] = []
@@ -184,7 +185,7 @@ async def _load_or_fetch_candles(
     return list(dataset.candles), dataset.metadata
 
 
-def _evaluation_config(args: argparse.Namespace) -> EvaluationConfig:
+def _evaluation_config(args: argparse.Namespace, *, inst_ids: tuple[str, ...]) -> EvaluationConfig:
     max_drawdown = Decimal(args.max_drawdown_usdt)
     min_profit_factor = args.min_profit_factor.strip().lower()
     return EvaluationConfig(
@@ -214,6 +215,18 @@ def _evaluation_config(args: argparse.Namespace) -> EvaluationConfig:
         min_walk_forward_pass_rate=Decimal(args.min_walk_forward_pass_rate),
         min_stable_neighbors=args.min_stable_neighbors,
         parameter_stability_radius=args.parameter_stability_radius,
+        risk_config=RiskConfig(
+            allowed_inst_ids=inst_ids,
+            cooldown_seconds=args.cooldown_seconds,
+            max_position_by_inst_id={
+                inst_id: Decimal("0.05" if inst_id.startswith("ETH-") else "0.005")
+                for inst_id in inst_ids
+            },
+            min_order_by_inst_id={
+                inst_id: Decimal("0.0001" if inst_id.startswith("ETH-") else "0.00001")
+                for inst_id in inst_ids
+            },
+        ),
     )
 
 

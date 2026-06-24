@@ -8,9 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from lumiere.backtest import CostModel
+from lumiere.execution import prepare_execution_plan
 from lumiere.ledger import EquityPoint, TradeFill, build_pnl_metrics, max_drawdown_usdt
 from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position, StrategyDecision
 from lumiere.paper_gate import PerformanceGateConfig, PerformanceGateDecision, assess_metrics
+from lumiere.risk import RiskConfig, RiskManager
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +22,7 @@ class PaperTradingConfig:
     cost_model: CostModel = CostModel()
     gate: PerformanceGateConfig = PerformanceGateConfig()
     max_evidence_age: timedelta = timedelta(days=7)
+    risk_config: RiskConfig | None = None
 
 
 @dataclass(slots=True)
@@ -89,6 +92,10 @@ class PaperTradingLedger:
         self.config.path.parent.mkdir(parents=True, exist_ok=True)
         self._events = _load_events(self.config.path)
         self._portfolio = self._replay(self._events)
+        self._risk_manager = RiskManager(config.risk_config) if config.risk_config else None
+        if self._risk_manager is not None:
+            for fill in self._portfolio.fills:
+                self._risk_manager.record_trade(fill.ts, inst_id=fill.inst_id)
 
     @property
     def events(self) -> tuple[dict[str, Any], ...]:
@@ -124,6 +131,13 @@ class PaperTradingLedger:
             daily_realized_pnl_usdt=self._portfolio.realized_pnl_usdt,
             daily_trade_count=self._portfolio.trade_count,
             max_drawdown_usdt=max_drawdown_usdt(tuple(self._portfolio.equity_curve)),
+            spread_bps=self.config.cost_model.spread_bps,
+            estimated_slippage_bps=(
+                self.config.cost_model.slippage_bps + self.config.cost_model.market_impact_bps
+            ),
+            estimated_total_cost_bps=(
+                self.config.cost_model.order_cost_bps + self.config.cost_model.taker_fee_bps
+            ),
             performance_gate_passed=gate.allowed,
             performance_gate_reason=gate.reason,
         )
@@ -157,6 +171,42 @@ class PaperTradingLedger:
                 inst_id=decision.inst_id,
             )
             return
+
+        execution_plan = prepare_execution_plan(
+            decision,
+            self.account_snapshot(
+                mark_prices={decision.inst_id: candle.close},
+                now=candle.ts,
+            ),
+            self._risk_manager,
+            now=candle.ts,
+            mark_price=candle.close,
+        )
+        if not execution_plan.allowed:
+            self._append(
+                {
+                    "type": "simulated_rejection",
+                    "ts": candle.ts.isoformat(),
+                    "strategy_name": strategy_name,
+                    "inst_id": decision.inst_id,
+                    "side": decision.action.value,
+                    "size_base": str(decision.size_btc),
+                    "requested_size_base": str(execution_plan.requested_size_btc),
+                    "clamped_size_base": str(execution_plan.clamped_size_btc),
+                    "decision_price": str(candle.close),
+                    "reason": execution_plan.reason,
+                    "blocked_signal_notional_usdt": str(
+                        execution_plan.blocked_signal_notional_usdt
+                    ),
+                }
+            )
+            self._append_portfolio_state(
+                candle.ts,
+                strategy_name=strategy_name,
+                inst_id=decision.inst_id,
+            )
+            return
+        decision = execution_plan.decision
 
         fill_size = self._paper_fill_size(decision)
         if fill_size <= 0:
@@ -214,7 +264,8 @@ class PaperTradingLedger:
                 "inst_id": decision.inst_id,
                 "side": decision.action.value,
                 "size_base": str(fill_size),
-                "requested_size_base": str(decision.size_btc),
+                "requested_size_base": str(execution_plan.requested_size_btc),
+                "clamped_size_base": str(execution_plan.clamped_size_btc),
                 "decision_price": str(candle.close),
                 "fill_price": str(price),
                 "fee_usdt": str(fee),
@@ -222,6 +273,8 @@ class PaperTradingLedger:
                 "spread_bps": str(self.config.cost_model.spread_bps),
             }
         )
+        if self._risk_manager is not None:
+            self._risk_manager.record_trade(candle.ts, inst_id=decision.inst_id)
         self._append_portfolio_state(
             candle.ts,
             strategy_name=strategy_name,

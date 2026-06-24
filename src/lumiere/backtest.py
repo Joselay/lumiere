@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
+from lumiere.execution import prepare_execution_plan
 from lumiere.ledger import (
     BASIS_POINTS,
     EquityPoint,
@@ -17,6 +18,7 @@ from lumiere.ledger import (
     risk_adjusted_ratios,
 )
 from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position, StrategyDecision
+from lumiere.risk import RiskConfig, RiskManager
 from lumiere.strategy import TradingStrategy
 
 
@@ -84,6 +86,7 @@ class BacktestConfig:
     execution_timing: ExecutionTiming = "next_open"
     ignore_unconfirmed_candles: bool = True
     include_same_close_comparison: bool = True
+    risk_config: RiskConfig | None = None
 
     def __post_init__(self) -> None:
         if self.starting_equity_usdt <= 0:
@@ -111,6 +114,9 @@ class BacktestReport:
     assumptions: dict[str, str | int]
     execution_timing: ExecutionTiming = "next_open"
     same_close_comparison: dict[str, str | int] | None = None
+    risk_rejection_count: int = 0
+    risk_rejections: dict[str, int] = field(default_factory=dict)
+    blocked_signal_opportunity_cost_usdt: Decimal = Decimal("0")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +131,11 @@ class BacktestReport:
             "rejected_order_count": self.rejected_order_count,
             "execution_timing": self.execution_timing,
             "same_close_comparison": self.same_close_comparison,
+            "risk_rejection_count": self.risk_rejection_count,
+            "risk_rejections": self.risk_rejections,
+            "blocked_signal_opportunity_cost_usdt": str(
+                self.blocked_signal_opportunity_cost_usdt
+            ),
             "assumptions": self.assumptions,
         }
 
@@ -172,6 +183,7 @@ class Backtester:
                     "max_drawdown_usdt": str(comparison.metrics.max_drawdown_usdt),
                     "trade_count": comparison.metrics.trade_count,
                     "rejected_order_count": comparison.rejected_order_count,
+                    "risk_rejection_count": comparison.risk_rejection_count,
                 },
             )
         return report
@@ -187,7 +199,10 @@ class Backtester:
         entry_index: int | None = None
         highest_since_entry: Decimal | None = None
         rejected_orders = 0
+        risk_rejections: dict[str, int] = {}
+        blocked_signal_opportunity_cost = Decimal("0")
         pending_decision: StrategyDecision | None = None
+        risk_manager = RiskManager(self.config.risk_config) if self.config.risk_config else None
         cost_model = self.config.cost_model
         inst_id = self.strategy.config.inst_id
 
@@ -209,6 +224,8 @@ class Backtester:
                         rejected_orders += 1
                 if fill is not None:
                     fills.append(fill)
+                    if risk_manager is not None:
+                        risk_manager.record_trade(fill.ts, inst_id=fill.inst_id)
                     cash, position, entry_price, entry_index, highest_since_entry = (
                         self._apply_fill(
                             fill,
@@ -223,10 +240,18 @@ class Backtester:
                     )
                 pending_decision = None
 
+            current_equity = cash + position * candle.close
             account = AccountSnapshot(
-                equity_usdt=cash + position * candle.close,
+                equity_usdt=current_equity,
                 available_usdt=cash,
                 positions=((Position(inst_id=inst_id, size_btc=position),) if position > 0 else ()),
+                daily_trade_count=len(fills),
+                max_drawdown_usdt=max_drawdown_usdt(
+                    (*equity_curve, EquityPoint(candle.ts, current_equity))
+                ),
+                spread_bps=cost_model.spread_bps,
+                estimated_slippage_bps=cost_model.slippage_bps + cost_model.market_impact_bps,
+                estimated_total_cost_bps=cost_model.order_cost_bps + cost_model.taker_fee_bps,
                 performance_gate_passed=True,
             )
             exit_decision = self._exit_decision(
@@ -242,41 +267,59 @@ class Backtester:
                 account,
             )
             if decision.action in {DecisionAction.BUY, DecisionAction.SELL}:
-                if self.config.execution_timing == "next_open" and exit_decision is None:
-                    if index + 1 < len(ordered_candles):
-                        pending_decision = decision
-                    else:
-                        # A signal on the final candle has no known next bar and is deliberately
-                        # not filled; filling it would reintroduce a lookahead assumption.
-                        rejected_orders += 1
+                execution_plan = prepare_execution_plan(
+                    decision,
+                    account,
+                    risk_manager,
+                    now=candle.ts,
+                    mark_price=self._decision_mid_price(decision, candle),
+                )
+                if not execution_plan.allowed:
+                    reason = execution_plan.reason
+                    risk_rejections[reason] = risk_rejections.get(reason, 0) + 1
+                    blocked_signal_opportunity_cost += (
+                        execution_plan.blocked_signal_notional_usdt
+                    )
+                    rejected_orders += 1
                 else:
-                    attempted_orders += 1
-                    if cost_model.is_rejected(attempted_orders):
-                        rejected_orders += 1
+                    executable_decision = execution_plan.decision
+                    if self.config.execution_timing == "next_open" and exit_decision is None:
+                        if index + 1 < len(ordered_candles):
+                            pending_decision = executable_decision
+                        else:
+                            # A signal on the final candle has no known next bar and is deliberately
+                            # not filled; filling it would reintroduce a lookahead assumption.
+                            rejected_orders += 1
                     else:
-                        fill = self._execute_decision(
-                            decision,
-                            mid_price=self._decision_mid_price(decision, candle),
-                            ts=candle.ts,
-                            cash=cash,
-                            position=position,
-                        )
-                        if fill is None:
+                        attempted_orders += 1
+                        if cost_model.is_rejected(attempted_orders):
                             rejected_orders += 1
                         else:
-                            fills.append(fill)
-                            cash, position, entry_price, entry_index, highest_since_entry = (
-                                self._apply_fill(
-                                    fill,
-                                    cash,
-                                    position,
-                                    entry_price,
-                                    entry_index,
-                                    highest_since_entry,
-                                    entry_index_for_new_position=index,
-                                    high_for_new_position=candle.high,
-                                )
+                            fill = self._execute_decision(
+                                executable_decision,
+                                mid_price=self._decision_mid_price(executable_decision, candle),
+                                ts=candle.ts,
+                                cash=cash,
+                                position=position,
                             )
+                            if fill is None:
+                                rejected_orders += 1
+                            else:
+                                fills.append(fill)
+                                if risk_manager is not None:
+                                    risk_manager.record_trade(fill.ts, inst_id=fill.inst_id)
+                                cash, position, entry_price, entry_index, highest_since_entry = (
+                                    self._apply_fill(
+                                        fill,
+                                        cash,
+                                        position,
+                                        entry_price,
+                                        entry_index,
+                                        highest_since_entry,
+                                        entry_index_for_new_position=index,
+                                        high_for_new_position=candle.high,
+                                    )
+                                )
             if position > 0:
                 highest_since_entry = max(highest_since_entry or candle.high, candle.high)
 
@@ -327,6 +370,9 @@ class Backtester:
             rejected_order_count=rejected_orders,
             assumptions=assumptions,
             execution_timing=self.config.execution_timing,
+            risk_rejection_count=sum(risk_rejections.values()),
+            risk_rejections=risk_rejections,
+            blocked_signal_opportunity_cost_usdt=blocked_signal_opportunity_cost,
         )
 
     def _exit_decision(
