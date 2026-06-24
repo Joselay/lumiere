@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     okx_inst_ids: str = ""
     okx_td_mode: str = "cash"
     okx_order_type: str = "market"
+    okx_execution_policy: str = "market"
+    okx_limit_cancel_replace_timeout_seconds: int = 30
     okx_order_tag: str = "lumieredemo"
 
     telegram_bot_token: str = Field(min_length=1)
@@ -84,6 +86,8 @@ class Settings(BaseSettings):
     risk_max_portfolio_exposure_pct: Decimal = Decimal("1")
     risk_drawdown_derisk_threshold_usdt: Decimal = Decimal("0")
     risk_drawdown_derisk_multiplier: Decimal = Decimal("0.5")
+    risk_max_maker_non_fill_rate: Decimal = Decimal("0")
+    risk_max_maker_adverse_selection_bps: Decimal = Decimal("0")
     risk_require_performance_gate: bool = False
     paper_ledger_path: str = "data/paper_trading.jsonl"
     attribution_ledger_path: str = "data/attribution.jsonl"
@@ -115,6 +119,15 @@ class Settings(BaseSettings):
     def supported_inst_ids(cls, value: str) -> str:
         if value.strip():
             _validate_supported_inst_ids(_parse_inst_ids(value))
+        return value
+
+    @field_validator("okx_execution_policy")
+    @classmethod
+    def supported_execution_policy(cls, value: str) -> str:
+        if value not in {"market", "marketable_limit", "post_only_maker"}:
+            raise ValueError(
+                "OKX_EXECUTION_POLICY must be market, marketable_limit, or post_only_maker"
+            )
         return value
 
     @field_validator("okx_order_tag")
@@ -205,6 +218,8 @@ class Settings(BaseSettings):
             poll_interval_seconds=self.engine_poll_interval_seconds,
             td_mode=self.okx_td_mode,
             order_type=self.okx_order_type,
+            execution_policy=self.okx_execution_policy,
+            limit_cancel_replace_timeout_seconds=self.okx_limit_cancel_replace_timeout_seconds,
             position_state_path=self.live_position_state_path or None,
             unexpected_position_policy=self.live_unexpected_position_policy,
             stop_loss_bps=_positive_decimal_or_none(self.live_stop_loss_bps),
@@ -258,6 +273,10 @@ class Settings(BaseSettings):
             max_portfolio_exposure_pct=self.risk_max_portfolio_exposure_pct,
             drawdown_derisk_threshold_usdt=self.risk_drawdown_derisk_threshold_usdt,
             drawdown_derisk_multiplier=self.risk_drawdown_derisk_multiplier,
+            max_maker_non_fill_rate=_positive_decimal_or_none(self.risk_max_maker_non_fill_rate),
+            max_maker_adverse_selection_bps=_positive_decimal_or_none(
+                self.risk_max_maker_adverse_selection_bps
+            ),
             performance_gate_required=self.risk_require_performance_gate,
         )
 

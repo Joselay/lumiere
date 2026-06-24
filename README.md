@@ -18,9 +18,9 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 | Exchange | OKX demo trading only (`OKX_FLAG=1`) |
 | Symbols | `BTC-USDT`, `ETH-USDT` |
 | Strategy | Config-selectable moving-average crossover, RSI mean-reversion, and ATR volatility-breakout strategies |
-| Orders | OKX market buy/sell orders through `python-okx` |
+| Orders | OKX market, marketable-limit, and post-only maker buy/sell orders through `python-okx` |
 | Telegram | `/start`, `/help`, `/status`, `/strategy`, `/performance`, `/risk`, `/pause`, `/resume`, `/panic` |
-| Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, order-book execution-cost/expected-edge guard, persistent rolling paper/live performance gate, max consecutive failures |
+| Risk controls | Demo guard, allowed symbols, min order size, max position size, cooldown, real fill-derived daily loss, max drawdown, daily trade limit, spread guard, order-book execution-cost/expected-edge guard, maker non-fill/adverse-selection guard, persistent rolling paper/live performance gate, max consecutive failures |
 | Profitability evidence | OKX SDK historical candle backtests with fees, spread, slippage, rejected-order modeling, PnL ledger metrics, and buy-and-hold/no-trade baselines |
 | Observability | Pretty structured logs plus persistent JSONL attribution ledger with configurable `LOG_LEVEL` |
 
@@ -42,7 +42,7 @@ Lumiere is a Python trading bot workspace for experimenting with automated OKX d
 
 Lumiere can help collect evidence and enforce safeguards, but **profit is never guaranteed**. Backtests are not live trading: fees, spread, slippage, liquidity, rejected orders, and regime changes can make live/demo results worse than historical reports.
 
-Current default assumptions for reports are conservative but configurable: 10 bps taker fee, 2 bps spread, 5 bps slippage, 0 bps market impact, and no synthetic rejected orders unless requested.
+Current default assumptions for reports are conservative but configurable: 10 bps taker fee, 2 bps maker fee, 2 bps spread, 5 bps slippage, 0 bps market impact, market execution, and no synthetic rejected orders unless requested.
 
 ## Setup
 
@@ -72,7 +72,9 @@ uv run lumiere-backtest \
 uv run lumiere-backtest --offline --bar 1m --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z
 ```
 
-The JSON report includes full-period metrics plus chronological train/validation/test and rolling walk-forward reports. Each split shows in-sample vs out-of-sample net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, trade count, win rate, profit factor, Sharpe/Sortino when available, rejected order count, and buy-and-hold/no-trade baseline comparisons.
+The JSON report includes full-period metrics plus chronological train/validation/test and rolling walk-forward reports. Each split shows in-sample vs out-of-sample net PnL after modeled costs, realized/unrealized PnL, equity curve, max drawdown, trade count, win rate, profit factor, Sharpe/Sortino when available, rejected order count, execution-quality metrics, and buy-and-hold/no-trade baseline comparisons.
+
+Maker/limit execution experiments are available with `--execution-policy marketable_limit` or `--execution-policy post_only_maker`. Post-only reports model maker fees, bid/ask limit prices, configurable queue partial fills (`--maker-fill-fraction`), non-fills/timeouts, realized spread capture, adverse selection, and missed-trade opportunity cost. Live/demo mode can use `OKX_EXECUTION_POLICY=marketable_limit` or `post_only_maker`; limit prices are generated from the current OKX order book, and post-only mode should be paired with `RISK_MAX_MAKER_NON_FILL_RATE` and `RISK_MAX_MAKER_ADVERSE_SELECTION_BPS` so risk audit can disable maker execution when quality degrades.
 
 Optimize all strategy families with the same cached data and cost assumptions:
 

@@ -28,6 +28,8 @@ class RiskConfig:
     max_portfolio_exposure_pct: Decimal = Decimal("1")
     drawdown_derisk_threshold_usdt: Decimal = Decimal("0")
     drawdown_derisk_multiplier: Decimal = Decimal("0.5")
+    max_maker_non_fill_rate: Decimal | None = None
+    max_maker_adverse_selection_bps: Decimal | None = None
 
     def __post_init__(self) -> None:
         if self.demo_flag != "1":
@@ -62,6 +64,15 @@ class RiskConfig:
             raise ValueError("drawdown_derisk_threshold_usdt cannot be negative")
         if self.drawdown_derisk_multiplier <= 0 or self.drawdown_derisk_multiplier > 1:
             raise ValueError("drawdown_derisk_multiplier must be between 0 and 1")
+        if self.max_maker_non_fill_rate is not None and not (
+            Decimal("0") <= self.max_maker_non_fill_rate <= Decimal("1")
+        ):
+            raise ValueError("max_maker_non_fill_rate must be between 0 and 1")
+        if (
+            self.max_maker_adverse_selection_bps is not None
+            and self.max_maker_adverse_selection_bps < 0
+        ):
+            raise ValueError("max_maker_adverse_selection_bps cannot be negative")
         for inst_id, value in (self.max_position_by_inst_id or {}).items():
             if inst_id not in self.allowed_inst_ids:
                 raise ValueError(f"max position configured for disallowed instrument: {inst_id}")
@@ -137,6 +148,9 @@ class RiskManager:
             return RiskDecision(False, "max_consecutive_failures_reached")
         if decision.action is DecisionAction.HOLD:
             return RiskDecision(True, "hold_allowed")
+        maker_quality_decision = self._assess_maker_quality(decision, account)
+        if maker_quality_decision is not None:
+            return maker_quality_decision
         if _protective_exit(decision):
             if decision.action is not DecisionAction.SELL:
                 return RiskDecision(False, "protective_exit_must_sell")
@@ -192,6 +206,27 @@ class RiskManager:
         if decision.size_btc <= 0:
             return RiskDecision(False, "non_positive_order_size")
         return RiskDecision(True, "risk_checks_passed")
+
+    def _assess_maker_quality(
+        self,
+        decision: StrategyDecision,
+        account: AccountSnapshot,
+    ) -> RiskDecision | None:
+        if str(decision.inputs.get("execution_policy", "")) != "post_only_maker":
+            return None
+        if (
+            self.config.max_maker_non_fill_rate is not None
+            and account.maker_non_fill_rate is not None
+            and account.maker_non_fill_rate > self.config.max_maker_non_fill_rate
+        ):
+            return RiskDecision(False, "maker_non_fill_rate_too_high")
+        if (
+            self.config.max_maker_adverse_selection_bps is not None
+            and account.maker_adverse_selection_bps is not None
+            and account.maker_adverse_selection_bps > self.config.max_maker_adverse_selection_bps
+        ):
+            return RiskDecision(False, "maker_adverse_selection_too_high")
+        return None
 
     def clamp_order_size(self, decision: StrategyDecision, account: AccountSnapshot) -> Decimal:
         if decision.action is DecisionAction.HOLD:

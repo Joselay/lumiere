@@ -11,7 +11,12 @@ from typing import Protocol
 import structlog
 
 from lumiere.attribution import AttributionLedger
-from lumiere.execution import prepare_execution_plan
+from lumiere.execution import (
+    ExecutionPolicy,
+    OrderBookTop,
+    order_request_for_execution,
+    prepare_execution_plan,
+)
 from lumiere.ledger import TradeFill
 from lumiere.live_positions import LivePositionState, LivePositionStore
 from lumiere.models import (
@@ -52,6 +57,10 @@ class TradingClient(Protocol):
     async def cancel_open_orders(self) -> list[dict]: ...
 
 
+class OrderBookAwareTradingClient(Protocol):
+    async def fetch_orderbook_top(self, inst_id: str) -> dict[str, Decimal] | OrderBookTop: ...
+
+
 class FillAwareTradingClient(Protocol):
     async def fetch_order_fills(
         self,
@@ -76,6 +85,8 @@ class EngineConfig:
     poll_interval_seconds: float = 30.0
     td_mode: str = "cash"
     order_type: str = "market"
+    execution_policy: str = "market"
+    limit_cancel_replace_timeout_seconds: int = 30
     experimental_intrabar: bool = False
     position_state_path: str | None = None
     unexpected_position_policy: str = "block"
@@ -89,6 +100,12 @@ class EngineConfig:
     def __post_init__(self) -> None:
         if self.unexpected_position_policy not in {"block", "adopt", "flatten", "ignore"}:
             raise ValueError("unexpected_position_policy must be block, adopt, flatten, or ignore")
+        if self.execution_policy not in {"market", "marketable_limit", "post_only_maker"}:
+            raise ValueError(
+                "execution_policy must be market, marketable_limit, or post_only_maker"
+            )
+        if self.limit_cancel_replace_timeout_seconds <= 0:
+            raise ValueError("limit_cancel_replace_timeout_seconds must be positive")
         for value in (self.stop_loss_bps, self.take_profit_bps, self.trailing_stop_bps):
             if value is not None and value <= 0:
                 raise ValueError("live exit bps values must be positive when configured")
@@ -327,13 +344,7 @@ class TradingEngine:
                     self.risk_manager.record_success()
                     continue
 
-                order = OrderRequest(
-                    inst_id=decision.inst_id,
-                    side=decision.action,
-                    size_btc=execution_plan.clamped_size_btc,
-                    td_mode=self.config.td_mode,
-                    order_type=self.config.order_type,
-                )
+                order = await self._build_order_request(decision, execution_plan.clamped_size_btc)
                 submitted_at = utc_now()
                 result = await self.client.place_market_order(order)
                 self._record_attribution_order(order, result, candles)
@@ -373,6 +384,39 @@ class TradingEngine:
                 await self.notifier.send(
                     "⏸️ <b>Trading paused</b>\nMax consecutive failures reached"
                 )
+
+    async def _build_order_request(
+        self,
+        decision: StrategyDecision,
+        size_btc: Decimal,
+    ) -> OrderRequest:
+        policy_name = self.config.execution_policy
+        if policy_name == "market" and self.config.order_type in {"limit", "post_only"}:
+            policy_name = (
+                "marketable_limit" if self.config.order_type == "limit" else "post_only_maker"
+            )
+        policy = ExecutionPolicy(
+            name=policy_name,  # type: ignore[arg-type]
+            cancel_replace_timeout_seconds=self.config.limit_cancel_replace_timeout_seconds,
+        )
+        order_book = None
+        if policy.name != "market":
+            fetch_top = getattr(self.client, "fetch_orderbook_top", None)
+            if fetch_top is None:
+                raise RuntimeError("limit execution policy requires fetch_orderbook_top support")
+            raw_book = await fetch_top(decision.inst_id)
+            order_book = _coerce_order_book_top(raw_book)
+        decision = replace(
+            decision,
+            inputs=decision.inputs | {"execution_policy": policy.name},
+        )
+        return order_request_for_execution(
+            decision,
+            size_btc=size_btc,
+            td_mode=self.config.td_mode,
+            policy=policy,
+            order_book=order_book,
+        )
 
     async def _refresh_account(self) -> AccountSnapshot:
         account = await self.client.fetch_account_snapshot()
@@ -702,6 +746,12 @@ def _decision_candles(candles, *, intrabar: bool) -> list[MarketCandle]:
     if intrabar:
         return ordered
     return [candle for candle in ordered if getattr(candle, "confirmed", True)]
+
+
+def _coerce_order_book_top(raw_book: dict[str, Decimal] | OrderBookTop) -> OrderBookTop:
+    if isinstance(raw_book, OrderBookTop):
+        return raw_book
+    return OrderBookTop(bid=Decimal(str(raw_book["bid"])), ask=Decimal(str(raw_book["ask"])))
 
 
 def _decimal_or_none(value: object) -> Decimal | None:

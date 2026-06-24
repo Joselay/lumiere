@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from lumiere.config import Settings
+from lumiere.execution import OrderBookTop
 from lumiere.ledger import TradeFill, realized_pnl_for_period, trade_fill_from_okx_row
 from lumiere.models import (
     AccountSnapshot,
@@ -132,6 +133,22 @@ class OKXDemoClient:
     async def fetch_max_spread_bps(self) -> Decimal:
         spread, _ = await self.fetch_execution_quality_bps()
         return spread
+
+    async def fetch_orderbook_top(self, inst_id: str) -> OrderBookTop:
+        response = await asyncio.to_thread(
+            self._market.get_orderbook,
+            instId=inst_id,
+            sz="1",
+        )
+        data = _require_ok_response(response)
+        if not data:
+            raise OKXAPIError("OKX returned no orderbook data")
+        orderbook = data[0]
+        bids = orderbook.get("bids") or []
+        asks = orderbook.get("asks") or []
+        if not bids or not asks:
+            raise OKXAPIError("OKX orderbook is missing bids or asks")
+        return OrderBookTop(bid=Decimal(str(bids[0][0])), ask=Decimal(str(asks[0][0])))
 
     async def fetch_execution_quality_bps(self) -> tuple[Decimal, Decimal]:
         spreads: list[Decimal] = []

@@ -7,7 +7,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from lumiere.backtest import CostModel
+from lumiere.backtest import (
+    CostModel,
+    _adverse_selection_bps,
+    _maker_limit_price,
+    _maker_order_crossed,
+    _missed_trade_opportunity_cost,
+    _spread_capture_bps,
+)
 from lumiere.execution import prepare_execution_plan
 from lumiere.ledger import EquityPoint, TradeFill, build_pnl_metrics, max_drawdown_usdt
 from lumiere.models import AccountSnapshot, DecisionAction, MarketCandle, Position, StrategyDecision
@@ -139,6 +146,8 @@ class PaperTradingLedger:
                 self.config.cost_model.order_cost_bps + self.config.cost_model.taker_fee_bps
             ),
             performance_gate_passed=gate.allowed,
+            maker_non_fill_rate=self._maker_non_fill_rate(),
+            maker_adverse_selection_bps=self._maker_adverse_selection_bps(),
             performance_gate_reason=gate.reason,
         )
 
@@ -231,8 +240,47 @@ class PaperTradingLedger:
             )
             return
 
-        price = self.config.cost_model.execution_price(decision.action, candle.close)
-        fee = self.config.cost_model.fee_usdt(fill_size * price)
+        maker = self.config.cost_model.execution_policy == "post_only_maker"
+        requested_fill_size = fill_size
+        reference_price = Decimal(str(decision.inputs.get("decision_price", candle.close)))
+        if maker:
+            price = _maker_limit_price(self.config.cost_model, decision.action, reference_price)
+            if not _maker_order_crossed(decision.action, price, candle):
+                market_price = self.config.cost_model.execution_price(
+                    decision.action,
+                    reference_price,
+                )
+                self._append(
+                    {
+                        "type": "simulated_rejection",
+                        "ts": candle.ts.isoformat(),
+                        "strategy_name": strategy_name,
+                        "inst_id": decision.inst_id,
+                        "side": decision.action.value,
+                        "size_base": str(decision.size_btc),
+                        "decision_price": str(candle.close),
+                        "execution_policy": self.config.cost_model.execution_policy,
+                        "reason": "maker_non_fill",
+                        "missed_trade_opportunity_cost_usdt": str(
+                            _missed_trade_opportunity_cost(
+                                decision.action,
+                                requested_fill_size,
+                                market_price,
+                                candle.close,
+                            )
+                        ),
+                    }
+                )
+                self._append_portfolio_state(
+                    candle.ts,
+                    strategy_name=strategy_name,
+                    inst_id=decision.inst_id,
+                )
+                return
+            fill_size *= self.config.cost_model.maker_fill_fraction
+        else:
+            price = self.config.cost_model.execution_price(decision.action, candle.close)
+        fee = self.config.cost_model.fee_usdt(fill_size * price, maker=maker)
         if (
             decision.action is DecisionAction.BUY
             and fill_size * price + fee > self._portfolio.cash_usdt
@@ -271,6 +319,21 @@ class PaperTradingLedger:
                 "fee_usdt": str(fee),
                 "slippage_bps": str(self.config.cost_model.order_cost_bps),
                 "spread_bps": str(self.config.cost_model.spread_bps),
+                "execution_policy": self.config.cost_model.execution_policy,
+                "partial_fill": fill_size < requested_fill_size,
+                "realized_spread_capture_bps": str(
+                    _spread_capture_bps(
+                        decision.action,
+                        maker_price=price,
+                        market_price=self.config.cost_model.execution_price(
+                            decision.action,
+                            reference_price,
+                        ),
+                    )
+                ),
+                "adverse_selection_bps": str(
+                    _adverse_selection_bps(decision.action, price, candle.close)
+                ),
             }
         )
         if self._risk_manager is not None:
@@ -297,6 +360,30 @@ class PaperTradingLedger:
             mark_prices=self._portfolio.latest_prices,
         )
         return assess_metrics(metrics, self.config.gate)
+
+    def _maker_non_fill_rate(self) -> Decimal | None:
+        maker_events = [
+            event
+            for event in self._events
+            if event.get("execution_policy") == "post_only_maker"
+            and event.get("type") in {"simulated_fill", "simulated_rejection"}
+        ]
+        if not maker_events:
+            return None
+        non_fills = sum(1 for event in maker_events if event.get("reason") == "maker_non_fill")
+        return Decimal(non_fills) / Decimal(len(maker_events))
+
+    def _maker_adverse_selection_bps(self) -> Decimal | None:
+        values = [
+            Decimal(str(event["adverse_selection_bps"]))
+            for event in self._events
+            if event.get("execution_policy") == "post_only_maker"
+            and event.get("type") == "simulated_fill"
+            and "adverse_selection_bps" in event
+        ]
+        if not values:
+            return None
+        return sum(values, Decimal("0")) / Decimal(len(values))
 
     def _paper_fill_size(self, decision: StrategyDecision) -> Decimal:
         if decision.action is DecisionAction.BUY:

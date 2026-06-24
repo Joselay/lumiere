@@ -83,6 +83,16 @@ def audit_settings(settings: Settings) -> RiskAuditReport:
             Decimal("0") < risk.max_risk_per_trade_pct <= Decimal("0.05"),
             "RISK_MAX_RISK_PER_TRADE_PCT must be positive and no more than 5%",
         ),
+        RiskAuditCheck(
+            "maker_execution_guard_configured",
+            settings.okx_execution_policy != "post_only_maker"
+            or (
+                risk.max_maker_non_fill_rate is not None
+                and risk.max_maker_adverse_selection_bps is not None
+            ),
+            "post-only maker mode requires RISK_MAX_MAKER_NON_FILL_RATE and "
+            "RISK_MAX_MAKER_ADVERSE_SELECTION_BPS",
+        ),
     ]
     return RiskAuditReport(tuple(checks))
 

@@ -60,10 +60,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--breakout-atr-multiplier", default="0.5")
     parser.add_argument("--breakout-min-atr-pct", default="0.001")
     parser.add_argument("--taker-fee-bps", default="10")
+    parser.add_argument("--maker-fee-bps", default="2")
     parser.add_argument("--spread-bps", default="2")
     parser.add_argument("--slippage-bps", default="5")
     parser.add_argument("--market-impact-bps", default="0")
     parser.add_argument("--reject-every-n-orders", type=int, default=0)
+    parser.add_argument(
+        "--execution-policy",
+        choices=("market", "marketable_limit", "post_only_maker"),
+        default="market",
+    )
+    parser.add_argument("--marketable-limit-buffer-bps", default="1")
+    parser.add_argument("--post-only-offset-bps", default="0")
+    parser.add_argument("--maker-timeout-bars", type=int, default=1)
+    parser.add_argument("--maker-fill-fraction", default="1")
     parser.add_argument("--stop-loss-bps", default="0")
     parser.add_argument("--take-profit-bps", default="0")
     parser.add_argument("--trailing-stop-bps", default="0")
@@ -85,10 +95,16 @@ async def run_backtest(args: argparse.Namespace) -> list[dict]:
     data_client = None if args.offline else OKXHistoricalDataClient(flag="1")
     cost_model = CostModel(
         taker_fee_bps=Decimal(args.taker_fee_bps),
+        maker_fee_bps=Decimal(args.maker_fee_bps),
         spread_bps=Decimal(args.spread_bps),
         slippage_bps=Decimal(args.slippage_bps),
         market_impact_bps=Decimal(args.market_impact_bps),
         reject_every_n_orders=args.reject_every_n_orders,
+        execution_policy=args.execution_policy,
+        marketable_limit_buffer_bps=Decimal(args.marketable_limit_buffer_bps),
+        post_only_offset_bps=Decimal(args.post_only_offset_bps),
+        maker_timeout_bars=args.maker_timeout_bars,
+        maker_fill_fraction=Decimal(args.maker_fill_fraction),
     )
     evaluation_config = EvaluationConfig(
         train_fraction=Decimal(args.train_fraction),

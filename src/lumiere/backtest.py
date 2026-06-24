@@ -5,7 +5,12 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from lumiere.execution import prepare_execution_plan
+from lumiere.execution import (
+    ExecutionPolicy,
+    ExecutionPolicyName,
+    OrderBookTop,
+    prepare_execution_plan,
+)
 from lumiere.ledger import (
     BASIS_POINTS,
     EquityPoint,
@@ -27,14 +32,22 @@ class CostModel:
     """Deterministic market-order cost assumptions for backtests."""
 
     taker_fee_bps: Decimal = Decimal("10")
+    maker_fee_bps: Decimal = Decimal("2")
     spread_bps: Decimal = Decimal("2")
     slippage_bps: Decimal = Decimal("5")
     market_impact_bps: Decimal = Decimal("0")
     reject_every_n_orders: int = 0
+    execution_policy: ExecutionPolicyName = "market"
+    marketable_limit_buffer_bps: Decimal = Decimal("1")
+    post_only_offset_bps: Decimal = Decimal("0")
+    maker_timeout_bars: int = 1
+    maker_fill_fraction: Decimal = Decimal("1")
 
     def __post_init__(self) -> None:
         if self.taker_fee_bps < 0:
             raise ValueError("taker_fee_bps cannot be negative")
+        if self.maker_fee_bps < 0:
+            raise ValueError("maker_fee_bps cannot be negative")
         if self.spread_bps < 0:
             raise ValueError("spread_bps cannot be negative")
         if self.slippage_bps < 0:
@@ -43,6 +56,18 @@ class CostModel:
             raise ValueError("market_impact_bps cannot be negative")
         if self.reject_every_n_orders < 0:
             raise ValueError("reject_every_n_orders cannot be negative")
+        if self.execution_policy not in {"market", "marketable_limit", "post_only_maker"}:
+            raise ValueError(
+                "execution_policy must be market, marketable_limit, or post_only_maker"
+            )
+        if self.marketable_limit_buffer_bps < 0:
+            raise ValueError("marketable_limit_buffer_bps cannot be negative")
+        if self.post_only_offset_bps < 0:
+            raise ValueError("post_only_offset_bps cannot be negative")
+        if self.maker_timeout_bars <= 0:
+            raise ValueError("maker_timeout_bars must be positive")
+        if self.maker_fill_fraction <= 0 or self.maker_fill_fraction > 1:
+            raise ValueError("maker_fill_fraction must be between 0 and 1")
 
     @property
     def order_cost_bps(self) -> Decimal:
@@ -56,8 +81,16 @@ class CostModel:
             return mid_price * (Decimal("1") - adjustment)
         raise ValueError("execution_price requires buy or sell side")
 
-    def fee_usdt(self, notional_usdt: Decimal) -> Decimal:
-        return abs(notional_usdt) * self.taker_fee_bps / BASIS_POINTS
+    def fee_usdt(self, notional_usdt: Decimal, *, maker: bool = False) -> Decimal:
+        fee_bps = self.maker_fee_bps if maker else self.taker_fee_bps
+        return abs(notional_usdt) * fee_bps / BASIS_POINTS
+
+    def execution_policy_config(self) -> ExecutionPolicy:
+        return ExecutionPolicy(
+            name=self.execution_policy,
+            marketable_limit_buffer_bps=self.marketable_limit_buffer_bps,
+            post_only_offset_bps=self.post_only_offset_bps,
+        )
 
     def is_rejected(self, order_number: int) -> bool:
         return self.reject_every_n_orders > 0 and order_number % self.reject_every_n_orders == 0
@@ -65,10 +98,16 @@ class CostModel:
     def assumptions(self) -> dict[str, str | int]:
         return {
             "taker_fee_bps": str(self.taker_fee_bps),
+            "maker_fee_bps": str(self.maker_fee_bps),
             "spread_bps": str(self.spread_bps),
             "slippage_bps": str(self.slippage_bps),
             "market_impact_bps": str(self.market_impact_bps),
             "reject_every_n_orders": self.reject_every_n_orders,
+            "execution_policy": self.execution_policy,
+            "marketable_limit_buffer_bps": str(self.marketable_limit_buffer_bps),
+            "post_only_offset_bps": str(self.post_only_offset_bps),
+            "maker_timeout_bars": self.maker_timeout_bars,
+            "maker_fill_fraction": str(self.maker_fill_fraction),
         }
 
 
@@ -101,6 +140,79 @@ class BacktestConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionQualityAccumulator:
+    policy: str
+    attempted_order_count: int = 0
+    filled_order_count: int = 0
+    non_fill_count: int = 0
+    partial_fill_count: int = 0
+    fill_delay_bars_total: int = 0
+    realized_spread_capture_bps_total: Decimal = Decimal("0")
+    adverse_selection_bps_total: Decimal = Decimal("0")
+    missed_trade_opportunity_cost_usdt: Decimal = Decimal("0")
+
+    def record_fill(
+        self,
+        *,
+        requested_size: Decimal,
+        filled_size: Decimal,
+        fill_delay_bars: int,
+        spread_capture_bps: Decimal,
+        adverse_selection_bps: Decimal,
+    ) -> ExecutionQualityAccumulator:
+        return replace(
+            self,
+            filled_order_count=self.filled_order_count + 1,
+            partial_fill_count=(
+                self.partial_fill_count + (1 if filled_size < requested_size else 0)
+            ),
+            fill_delay_bars_total=self.fill_delay_bars_total + fill_delay_bars,
+            realized_spread_capture_bps_total=(
+                self.realized_spread_capture_bps_total + spread_capture_bps
+            ),
+            adverse_selection_bps_total=(
+                self.adverse_selection_bps_total + adverse_selection_bps
+            ),
+        )
+
+    def record_non_fill(self, opportunity_cost_usdt: Decimal) -> ExecutionQualityAccumulator:
+        return replace(
+            self,
+            non_fill_count=self.non_fill_count + 1,
+            missed_trade_opportunity_cost_usdt=(
+                self.missed_trade_opportunity_cost_usdt + opportunity_cost_usdt
+            ),
+        )
+
+    def to_dict(self) -> dict[str, str | int]:
+        attempts = Decimal(self.attempted_order_count or 1)
+        fills = Decimal(self.filled_order_count or 1)
+        return {
+            "policy": self.policy,
+            "attempted_order_count": self.attempted_order_count,
+            "filled_order_count": self.filled_order_count,
+            "non_fill_count": self.non_fill_count,
+            "partial_fill_count": self.partial_fill_count,
+            "non_fill_rate": str(Decimal(self.non_fill_count) / attempts),
+            "partial_fill_rate": str(Decimal(self.partial_fill_count) / attempts),
+            "average_fill_delay_bars": str(Decimal(self.fill_delay_bars_total) / fills),
+            "realized_spread_capture_bps": str(
+                self.realized_spread_capture_bps_total / fills
+            ),
+            "adverse_selection_bps": str(self.adverse_selection_bps_total / fills),
+            "missed_trade_opportunity_cost_usdt": str(
+                self.missed_trade_opportunity_cost_usdt
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SimulatedExecution:
+    fill: TradeFill | None
+    quality: ExecutionQualityAccumulator
+
+
+@dataclass(frozen=True, slots=True)
 class BacktestReport:
     inst_id: str
     strategy_name: str
@@ -117,6 +229,7 @@ class BacktestReport:
     risk_rejection_count: int = 0
     risk_rejections: dict[str, int] = field(default_factory=dict)
     blocked_signal_opportunity_cost_usdt: Decimal = Decimal("0")
+    execution_quality: dict[str, str | int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -136,6 +249,7 @@ class BacktestReport:
             "blocked_signal_opportunity_cost_usdt": str(
                 self.blocked_signal_opportunity_cost_usdt
             ),
+            "execution_quality": self.execution_quality,
             "assumptions": self.assumptions,
         }
 
@@ -204,24 +318,47 @@ class Backtester:
         pending_decision: StrategyDecision | None = None
         risk_manager = RiskManager(self.config.risk_config) if self.config.risk_config else None
         cost_model = self.config.cost_model
+        quality = ExecutionQualityAccumulator(policy=cost_model.execution_policy)
         inst_id = self.strategy.config.inst_id
 
         for index, candle in enumerate(ordered_candles):
+            pending_still_open = False
             if pending_decision is not None:
-                attempted_orders += 1
+                fill_delay_bars = _pending_fill_delay_bars(pending_decision, index)
+                if fill_delay_bars == 1:
+                    attempted_orders += 1
+                    quality = replace(
+                        quality,
+                        attempted_order_count=quality.attempted_order_count + 1,
+                    )
                 fill = None
-                if cost_model.is_rejected(attempted_orders):
+                maker_timeout_reached = fill_delay_bars >= cost_model.maker_timeout_bars
+                if fill_delay_bars == 1 and cost_model.is_rejected(attempted_orders):
                     rejected_orders += 1
+                    pending_decision = None
                 else:
-                    fill = self._execute_decision(
+                    execution = self._execute_decision(
                         pending_decision,
                         mid_price=candle.open,
+                        candle=candle,
                         ts=candle.ts,
                         cash=cash,
                         position=position,
+                        quality=quality,
+                        fill_delay_bars=fill_delay_bars,
+                        record_non_fill=maker_timeout_reached,
                     )
+                    fill = execution.fill
+                    quality = execution.quality
                     if fill is None:
-                        rejected_orders += 1
+                        if (
+                            cost_model.execution_policy == "post_only_maker"
+                            and not maker_timeout_reached
+                        ):
+                            pending_still_open = True
+                        else:
+                            rejected_orders += 1
+                            pending_decision = None
                 if fill is not None:
                     fills.append(fill)
                     if risk_manager is not None:
@@ -238,7 +375,7 @@ class Backtester:
                             high_for_new_position=max(candle.open, candle.high),
                         )
                     )
-                pending_decision = None
+                    pending_decision = None
 
             current_equity = cash + position * candle.close
             account = AccountSnapshot(
@@ -253,7 +390,22 @@ class Backtester:
                 estimated_slippage_bps=cost_model.slippage_bps + cost_model.market_impact_bps,
                 estimated_total_cost_bps=cost_model.order_cost_bps + cost_model.taker_fee_bps,
                 performance_gate_passed=True,
+                maker_non_fill_rate=_quality_rate(
+                    quality.non_fill_count,
+                    quality.attempted_order_count,
+                ),
+                maker_adverse_selection_bps=_quality_average(
+                    quality.adverse_selection_bps_total,
+                    quality.filled_order_count,
+                ),
             )
+            if pending_still_open:
+                if position > 0:
+                    highest_since_entry = max(highest_since_entry or candle.high, candle.high)
+                equity_curve.append(EquityPoint(candle.ts, current_equity))
+                exposure_curve.append(ExposurePoint(candle.ts, position * candle.close))
+                continue
+
             exit_decision = self._exit_decision(
                 candle,
                 position,
@@ -282,7 +434,11 @@ class Backtester:
                     )
                     rejected_orders += 1
                 else:
-                    executable_decision = execution_plan.decision
+                    executable_decision = self._decision_with_execution_inputs(
+                        execution_plan.decision,
+                        candle.close,
+                        index,
+                    )
                     if self.config.execution_timing == "next_open" and exit_decision is None:
                         if index + 1 < len(ordered_candles):
                             pending_decision = executable_decision
@@ -292,16 +448,25 @@ class Backtester:
                             rejected_orders += 1
                     else:
                         attempted_orders += 1
+                        quality = replace(
+                            quality,
+                            attempted_order_count=quality.attempted_order_count + 1,
+                        )
                         if cost_model.is_rejected(attempted_orders):
                             rejected_orders += 1
                         else:
-                            fill = self._execute_decision(
+                            execution = self._execute_decision(
                                 executable_decision,
                                 mid_price=self._decision_mid_price(executable_decision, candle),
+                                candle=candle,
                                 ts=candle.ts,
                                 cash=cash,
                                 position=position,
+                                quality=quality,
+                                fill_delay_bars=0,
                             )
+                            fill = execution.fill
+                            quality = execution.quality
                             if fill is None:
                                 rejected_orders += 1
                             else:
@@ -373,6 +538,7 @@ class Backtester:
             risk_rejection_count=sum(risk_rejections.values()),
             risk_rejections=risk_rejections,
             blocked_signal_opportunity_cost_usdt=blocked_signal_opportunity_cost,
+            execution_quality=quality.to_dict(),
         )
 
     def _exit_decision(
@@ -437,25 +603,68 @@ class Backtester:
             return Decimal(str(raw_execution_price))
         return candle.close
 
+    def _decision_with_execution_inputs(
+        self,
+        decision: StrategyDecision,
+        reference_mid_price: Decimal,
+        submitted_index: int,
+    ) -> StrategyDecision:
+        return replace(
+            decision,
+            inputs=decision.inputs
+            | {
+                "execution_policy": self.config.cost_model.execution_policy,
+                "execution_reference_mid_price": str(reference_mid_price),
+                "execution_submitted_index": submitted_index,
+            },
+        )
+
     def _execute_decision(
         self,
         decision: StrategyDecision,
         *,
         mid_price: Decimal,
+        candle: MarketCandle,
         ts: datetime,
         cash: Decimal,
         position: Decimal,
-    ) -> TradeFill | None:
+        quality: ExecutionQualityAccumulator,
+        fill_delay_bars: int,
+        record_non_fill: bool = True,
+    ) -> SimulatedExecution:
         size = decision.size_btc
         if decision.action is DecisionAction.SELL:
             size = min(size, position)
         if size <= 0:
-            return None
-        price = self.config.cost_model.execution_price(decision.action, mid_price)
-        fee = self.config.cost_model.fee_usdt(size * price)
+            return SimulatedExecution(None, quality)
+        cost_model = self.config.cost_model
+        reference_mid_price = Decimal(
+            str(decision.inputs.get("execution_reference_mid_price", mid_price))
+        )
+        policy = cost_model.execution_policy
+        maker = policy == "post_only_maker"
+        if maker:
+            price = _maker_limit_price(cost_model, decision.action, reference_mid_price)
+            if not _maker_order_crossed(decision.action, price, candle):
+                if not record_non_fill:
+                    return SimulatedExecution(None, quality)
+                opportunity_cost = _missed_trade_opportunity_cost(
+                    decision.action,
+                    size,
+                    cost_model.execution_price(decision.action, mid_price),
+                    candle.close,
+                )
+                return SimulatedExecution(None, quality.record_non_fill(opportunity_cost))
+            size *= cost_model.maker_fill_fraction
+        elif policy == "marketable_limit":
+            book = _synthetic_order_book(cost_model, mid_price)
+            price = _marketable_limit_price(cost_model, decision.action, book)
+        else:
+            price = cost_model.execution_price(decision.action, mid_price)
+        fee = cost_model.fee_usdt(size * price, maker=maker)
         if decision.action is DecisionAction.BUY and cash < size * price + fee:
-            return None
-        return TradeFill(
+            return SimulatedExecution(None, quality)
+        fill = TradeFill(
             inst_id=decision.inst_id,
             side=decision.action,
             size_base=size,
@@ -463,6 +672,22 @@ class Backtester:
             fee=fee,
             fee_ccy="USDT",
             ts=ts,
+        )
+        spread_capture_bps = _spread_capture_bps(
+            decision.action,
+            maker_price=price,
+            market_price=cost_model.execution_price(decision.action, mid_price),
+        )
+        adverse_selection_bps = _adverse_selection_bps(decision.action, price, candle.close)
+        return SimulatedExecution(
+            fill,
+            quality.record_fill(
+                requested_size=decision.size_btc,
+                filled_size=size,
+                fill_delay_bars=fill_delay_bars,
+                spread_capture_bps=spread_capture_bps,
+                adverse_selection_bps=adverse_selection_bps,
+            ),
         )
 
     def _apply_fill(
@@ -495,6 +720,108 @@ class Backtester:
                 entry_index = None
                 highest_since_entry = None
         return cash, position, entry_price, entry_index, highest_since_entry
+
+
+def _pending_fill_delay_bars(decision: StrategyDecision, index: int) -> int:
+    submitted_index = int(decision.inputs.get("execution_submitted_index", index - 1))
+    return max(index - submitted_index, 0)
+
+
+def _quality_rate(count: int, attempts: int) -> Decimal | None:
+    if attempts <= 0:
+        return None
+    return Decimal(count) / Decimal(attempts)
+
+
+def _quality_average(total: Decimal, count: int) -> Decimal | None:
+    if count <= 0:
+        return None
+    return total / Decimal(count)
+
+
+def _synthetic_order_book(cost_model: CostModel, mid_price: Decimal) -> OrderBookTop:
+    half_spread = cost_model.spread_bps / Decimal("2") / BASIS_POINTS
+    return OrderBookTop(
+        bid=mid_price * (Decimal("1") - half_spread),
+        ask=mid_price * (Decimal("1") + half_spread),
+    )
+
+
+def _maker_limit_price(
+    cost_model: CostModel,
+    side: DecisionAction,
+    reference_mid_price: Decimal,
+) -> Decimal:
+    book = _synthetic_order_book(cost_model, reference_mid_price)
+    offset = cost_model.post_only_offset_bps / BASIS_POINTS
+    if side is DecisionAction.BUY:
+        return book.bid * (Decimal("1") - offset)
+    if side is DecisionAction.SELL:
+        return book.ask * (Decimal("1") + offset)
+    raise ValueError("maker limit requires buy or sell side")
+
+
+def _marketable_limit_price(
+    cost_model: CostModel,
+    side: DecisionAction,
+    book: OrderBookTop,
+) -> Decimal:
+    buffer = cost_model.marketable_limit_buffer_bps / BASIS_POINTS
+    if side is DecisionAction.BUY:
+        return book.ask * (Decimal("1") + buffer)
+    if side is DecisionAction.SELL:
+        return book.bid * (Decimal("1") - buffer)
+    raise ValueError("marketable limit requires buy or sell side")
+
+
+def _maker_order_crossed(side: DecisionAction, limit_price: Decimal, candle: MarketCandle) -> bool:
+    if side is DecisionAction.BUY:
+        return candle.low <= limit_price
+    if side is DecisionAction.SELL:
+        return candle.high >= limit_price
+    return False
+
+
+def _spread_capture_bps(
+    side: DecisionAction,
+    *,
+    maker_price: Decimal,
+    market_price: Decimal,
+) -> Decimal:
+    if maker_price <= 0:
+        return Decimal("0")
+    if side is DecisionAction.BUY:
+        return (market_price - maker_price) / maker_price * BASIS_POINTS
+    if side is DecisionAction.SELL:
+        return (maker_price - market_price) / maker_price * BASIS_POINTS
+    return Decimal("0")
+
+
+def _adverse_selection_bps(
+    side: DecisionAction,
+    fill_price: Decimal,
+    mark_price: Decimal,
+) -> Decimal:
+    if fill_price <= 0:
+        return Decimal("0")
+    if side is DecisionAction.BUY:
+        return max((fill_price - mark_price) / fill_price * BASIS_POINTS, Decimal("0"))
+    if side is DecisionAction.SELL:
+        return max((mark_price - fill_price) / fill_price * BASIS_POINTS, Decimal("0"))
+    return Decimal("0")
+
+
+def _missed_trade_opportunity_cost(
+    side: DecisionAction,
+    size: Decimal,
+    market_price: Decimal,
+    mark_price: Decimal,
+) -> Decimal:
+    if side is DecisionAction.BUY:
+        return max((mark_price - market_price) * size, Decimal("0"))
+    if side is DecisionAction.SELL:
+        return max((market_price - mark_price) * size, Decimal("0"))
+    return Decimal("0")
 
 
 def _buy_and_hold_pnl(

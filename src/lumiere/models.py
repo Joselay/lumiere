@@ -53,6 +53,8 @@ class AccountSnapshot:
     realized_slippage_bps: Decimal | None = None
     performance_gate_passed: bool = False
     performance_gate_reason: str = "not_evaluated"
+    maker_non_fill_rate: Decimal | None = None
+    maker_adverse_selection_bps: Decimal | None = None
 
     def __post_init__(self) -> None:
         positions = tuple(self.positions)
@@ -118,6 +120,7 @@ class OrderRequest:
     td_mode: str = "cash"
     order_type: str = "market"
     limit_price: Decimal | None = None
+    cancel_replace_timeout_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
