@@ -122,6 +122,12 @@ class AttributionLedger:
         fee: Decimal,
         ts: datetime,
         decision_price: Decimal | None = None,
+        fee_ccy: str = "USDT",
+        order_id: str = "",
+        trade_id: str = "",
+        client_order_id: str = "",
+        latency_ms: int | None = None,
+        raw: dict[str, Any] | None = None,
     ) -> None:
         self.record_event(
             "fill",
@@ -131,7 +137,13 @@ class AttributionLedger:
             size_base=str(size_base),
             price=str(price),
             fee=str(fee),
+            fee_ccy=fee_ccy,
             decision_price=None if decision_price is None else str(decision_price),
+            order_id=order_id,
+            trade_id=trade_id,
+            client_order_id=client_order_id,
+            latency_ms=latency_ms,
+            raw=_json_safe(raw or {}),
         )
 
     def record_event(self, event_type: str, ts: datetime, **payload: Any) -> None:
@@ -185,7 +197,18 @@ def _fill_from_event(event: dict[str, Any]) -> TradeFill:
         size_base=Decimal(str(event["size_base"])),
         price=Decimal(str(event["price"])),
         fee=Decimal(str(event.get("fee") or "0")),
+        fee_ccy=str(event.get("fee_ccy") or "USDT"),
         ts=_parse_datetime(str(event["ts"])),
+        order_id=str(event.get("order_id") or ""),
+        trade_id=str(event.get("trade_id") or ""),
+        client_order_id=str(event.get("client_order_id") or ""),
+        decision_price=(
+            None
+            if event.get("decision_price") in {None, ""}
+            else Decimal(str(event.get("decision_price")))
+        ),
+        latency_ms=None if event.get("latency_ms") is None else int(event["latency_ms"]),
+        raw=dict(event.get("raw") or {}),
     )
 
 

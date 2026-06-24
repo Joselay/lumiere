@@ -5,11 +5,13 @@ from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 
 import structlog
 
 from lumiere.attribution import AttributionLedger
+from lumiere.ledger import TradeFill
 from lumiere.models import (
     AccountSnapshot,
     DecisionAction,
@@ -45,6 +47,16 @@ class TradingClient(Protocol):
     async def place_market_order(self, request: OrderRequest) -> OrderResult: ...
 
     async def cancel_open_orders(self) -> list[dict]: ...
+
+
+class FillAwareTradingClient(Protocol):
+    async def fetch_order_fills(
+        self,
+        result: OrderResult,
+        *,
+        decision_price: Decimal | None = None,
+        submitted_at: datetime | None = None,
+    ) -> Sequence[TradeFill]: ...
 
 
 class Notifier(Protocol):
@@ -276,8 +288,10 @@ class TradingEngine:
                     td_mode=self.config.td_mode,
                     order_type=self.config.order_type,
                 )
+                submitted_at = utc_now()
                 result = await self.client.place_market_order(order)
                 self._record_attribution_order(order, result, candles)
+                await self._record_attribution_fills(result, decision, candles, submitted_at)
                 self.risk_manager.record_trade(inst_id=decision.inst_id)
                 self.risk_manager.record_success()
                 log.info(
@@ -346,6 +360,43 @@ class TradingEngine:
             return
         self.attribution_ledger.record_order(order, result, ts=candles[-1].ts)
 
+    async def _record_attribution_fills(
+        self,
+        result: OrderResult,
+        decision: StrategyDecision,
+        candles,
+        submitted_at: datetime,
+    ) -> None:
+        if self.attribution_ledger is None or not candles:
+            return
+        fetch_order_fills = getattr(self.client, "fetch_order_fills", None)
+        if fetch_order_fills is None:
+            return
+        decision_price = (
+            _decimal_or_none(decision.inputs.get("decision_price")) or candles[-1].close
+        )
+        fills = await fetch_order_fills(
+            result,
+            decision_price=decision_price,
+            submitted_at=submitted_at,
+        )
+        for fill in fills:
+            self.attribution_ledger.record_fill(
+                inst_id=fill.inst_id,
+                side=fill.side,
+                size_base=fill.size_base,
+                price=fill.price,
+                fee=fill.fee,
+                fee_ccy=fill.fee_ccy,
+                ts=fill.ts,
+                decision_price=fill.decision_price or decision_price,
+                order_id=fill.order_id or result.order_id,
+                trade_id=fill.trade_id,
+                client_order_id=fill.client_order_id or result.client_order_id or "",
+                latency_ms=fill.latency_ms,
+                raw=fill.raw,
+            )
+
     def _attribution_report(self) -> dict | None:
         if self.attribution_ledger is None:
             return None
@@ -371,6 +422,15 @@ class TradingEngine:
             return False
         self._risk_notification_sent_at[key] = now
         return True
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value in {None, "", "None"}:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _normalise_strategies(

@@ -21,6 +21,7 @@ lumiere-optimize = "lumiere.optimizer_cli:main"
 dev = [
   "pytest>=8.3,<9",
   "pytest-asyncio>=0.24,<2",
+  "pytest-cov>=7,<8",
   "ruff>=0.8,<1",
 ]
 
@@ -35,6 +36,23 @@ module-root = "src"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["lumiere"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+include = [
+  "src/lumiere/backtest_cli.py",
+  "src/lumiere/engine.py",
+  "src/lumiere/evidence_cli.py",
+  "src/lumiere/okx_client.py",
+  "src/lumiere/optimizer_cli.py",
+  "src/lumiere/telegram_bot.py",
+  "src/lumiere/telegram_ui.py",
+]
 
 [tool.ruff]
 line-length = 100

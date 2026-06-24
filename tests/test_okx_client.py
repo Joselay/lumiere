@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from lumiere.config import Settings
 from lumiere.models import DecisionAction, OrderRequest
 from lumiere.okx_client import (
+    OKXAPIError,
     OKXDemoClient,
     _daily_realized_pnl_from_fill_rows,
     _depth_slippage_bps_from_orderbook,
@@ -106,10 +107,57 @@ def test_daily_realized_pnl_is_derived_from_okx_fill_rows_after_fees() -> None:
 class FakeTradeAPI:
     def __init__(self) -> None:
         self.kwargs: dict[str, str] | None = None
+        self.cancelled: list[dict[str, str]] = []
+        self.now = datetime.now(tz=UTC)
 
     def place_order(self, **kwargs):
         self.kwargs = kwargs
         return {"code": "0", "data": [{"ordId": "ord-1", "sCode": "0", "sMsg": "OK"}]}
+
+    def get_fills(self, **kwargs):
+        _ = kwargs
+        return {"code": "0", "data": self._fill_rows()}
+
+    def get_fills_history(self, *args, **kwargs):
+        _ = args, kwargs
+        return {"code": "0", "data": self._fill_rows()[:1]}
+
+    def get_order_list(self, **kwargs):
+        _ = kwargs
+        return {"code": "0", "data": [{"ordId": "open-1"}, {"ordId": "open-2"}]}
+
+    def cancel_order(self, **kwargs):
+        self.cancelled.append(kwargs)
+        return {"code": "0", "data": [{"ordId": kwargs["ordId"], "sCode": "0"}]}
+
+    def _fill_rows(self) -> list[dict[str, str]]:
+        start = datetime(self.now.year, self.now.month, self.now.day, tzinfo=UTC)
+        buy_ts = int((start + timedelta(minutes=1)).timestamp() * 1000)
+        sell_ts = int((start + timedelta(minutes=2)).timestamp() * 1000)
+        return [
+            {
+                "instId": "BTC-USDT",
+                "side": "buy",
+                "fillSz": "1",
+                "fillPx": "100",
+                "fee": "-1",
+                "feeCcy": "USDT",
+                "ts": str(buy_ts),
+                "tradeId": "fill-1",
+                "ordId": "ord-1",
+            },
+            {
+                "instId": "BTC-USDT",
+                "side": "sell",
+                "fillSz": "1",
+                "fillPx": "120",
+                "fee": "-1",
+                "feeCcy": "USDT",
+                "ts": str(sell_ts),
+                "tradeId": "fill-2",
+                "ordId": "ord-2",
+            },
+        ]
 
 
 def make_demo_client(fake_trade: FakeTradeAPI) -> OKXDemoClient:
@@ -149,3 +197,115 @@ async def test_place_market_sell_order_leaves_default_size_currency() -> None:
     assert fake_trade.kwargs is not None
     assert fake_trade.kwargs["sz"] == "0.001"
     assert "tgtCcy" not in fake_trade.kwargs
+
+
+class FakeAccountAPI:
+    def get_account_balance(self):
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "totalEq": "1000",
+                    "details": [
+                        {"ccy": "USDT", "availBal": "800"},
+                        {"ccy": "BTC", "cashBal": "0.5"},
+                        {"ccy": "ETH", "cashBal": "2"},
+                    ],
+                }
+            ],
+        }
+
+    def get_positions(self, **kwargs):
+        inst_id = kwargs["instId"]
+        if inst_id == "ETH-USDT":
+            return {
+                "code": "0",
+                "data": [{"instId": "ETH-USDT", "pos": "2", "avgPx": "100", "upl": "3"}],
+            }
+        return {"code": "0", "data": []}
+
+
+class FakeMarketAPI:
+    def get_orderbook(self, **kwargs):
+        _ = kwargs
+        return {
+            "code": "0",
+            "data": [
+                {
+                    "bids": [["99", "3"], ["98", "3"]],
+                    "asks": [["101", "3"], ["102", "3"]],
+                }
+            ],
+        }
+
+
+@pytest.mark.asyncio
+async def test_fetch_account_snapshot_combines_balances_positions_fills_and_orderbooks() -> None:
+    fake_trade = FakeTradeAPI()
+    settings = Settings(
+        _env_file=None,
+        okx_api_key="key",
+        okx_api_secret="secret",
+        okx_passphrase="passphrase",
+        telegram_bot_token="token",
+        okx_inst_ids="BTC-USDT,ETH-USDT",
+    )
+    client = OKXDemoClient.__new__(OKXDemoClient)
+    client.settings = settings
+    client.risk_manager = RiskManager(
+        RiskConfig(
+            allowed_inst_ids=("BTC-USDT", "ETH-USDT"),
+            cooldown_seconds=0,
+            max_spread_bps=Decimal("1000"),
+        )
+    )
+    client._account = FakeAccountAPI()
+    client._market = FakeMarketAPI()
+    client._trade = fake_trade
+
+    snapshot = await client.fetch_account_snapshot()
+
+    assert snapshot.equity_usdt == Decimal("1000")
+    assert snapshot.available_usdt == Decimal("800")
+    assert snapshot.position_size("BTC-USDT") == Decimal("0.5")
+    assert snapshot.position_size("ETH-USDT") == Decimal("2")
+    assert snapshot.daily_realized_pnl_usdt == Decimal("18")
+    assert snapshot.daily_trade_count == 2
+    assert snapshot.spread_bps == Decimal("200")
+    assert snapshot.estimated_total_cost_bps is not None
+
+
+@pytest.mark.asyncio
+async def test_cancel_open_orders_cancels_each_okx_open_order() -> None:
+    fake_trade = FakeTradeAPI()
+    client = make_demo_client(fake_trade)
+
+    cancelled = await client.cancel_open_orders()
+
+    assert cancelled == [{"ordId": "open-1", "sCode": "0"}, {"ordId": "open-2", "sCode": "0"}]
+    assert fake_trade.cancelled == [
+        {"instId": "BTC-USDT", "ordId": "open-1", "clOrdId": ""},
+        {"instId": "BTC-USDT", "ordId": "open-2", "clOrdId": ""},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_place_order_raises_when_okx_rejects_or_returns_no_order_data() -> None:
+    class RejectingTradeAPI(FakeTradeAPI):
+        def place_order(self, **kwargs):
+            self.kwargs = kwargs
+            return {"code": "0", "data": [{"ordId": "bad", "sCode": "51000", "sMsg": "no"}]}
+
+    class EmptyTradeAPI(FakeTradeAPI):
+        def place_order(self, **kwargs):
+            self.kwargs = kwargs
+            return {"code": "0", "data": []}
+
+    with pytest.raises(OKXAPIError, match="OKX order rejected"):
+        await make_demo_client(RejectingTradeAPI()).place_market_order(
+            OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("0.001"))
+        )
+    with pytest.raises(OKXAPIError, match="no order data"):
+        await make_demo_client(EmptyTradeAPI()).place_market_order(
+            OrderRequest("BTC-USDT", DecisionAction.BUY, Decimal("0.001"))
+        )

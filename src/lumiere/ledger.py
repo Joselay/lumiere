@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from math import sqrt
@@ -23,6 +23,10 @@ class TradeFill:
     ts: datetime = datetime.min.replace(tzinfo=UTC)
     order_id: str = ""
     trade_id: str = ""
+    client_order_id: str = ""
+    decision_price: Decimal | None = None
+    latency_ms: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.side not in {DecisionAction.BUY, DecisionAction.SELL}:
