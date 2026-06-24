@@ -15,6 +15,7 @@ dependencies = [
 lumiere-bot = "lumiere.main:run"
 lumiere-backtest = "lumiere.backtest_cli:main"
 lumiere-evidence = "lumiere.evidence_cli:main"
+lumiere-evidence-matrix = "lumiere.evidence_matrix:main"
 lumiere-optimize = "lumiere.optimizer_cli:main"
 lumiere-risk-audit = "lumiere.risk_audit:main"
 

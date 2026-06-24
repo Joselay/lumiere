@@ -86,6 +86,16 @@ uv run lumiere-optimize \
 
 The optimizer writes `reports/strategy_optimization/optimizer_report.json` and `accepted_candidates.json`. Candidates are sorted by out-of-sample net PnL, drawdown, profit factor, Sharpe/Sortino, trade count, and win rate, and are rejected unless they pass out-of-sample gates, beat no-trade and buy-and-hold baselines, avoid train/test divergence, and satisfy any configured walk-forward and parameter-stability gates.
 
+Before increasing size, build the long-horizon evidence matrix across BTC/ETH, 1m/5m/15m/1H bars, all strategy modules, chronological train/validation/test splits, rolling walk-forward windows, and labeled market regimes:
+
+```bash
+uv run lumiere-evidence-matrix \
+  --start 2025-01-01T00:00:00Z --end 2026-01-01T00:00:00Z \
+  --min-regime-passes 2
+```
+
+The matrix writes `reports/evidence_matrix/evidence_matrix.json` plus `accepted_configs.json`. Each row includes dataset checksums, horizon checks, regime labels (trend/range, bull/bear, volatility, drawdown, liquidity proxy, event periods), net PnL after costs, profit factor, drawdown, Sharpe/Sortino, trade count, baseline deltas, risk rejections, and an accept/reject reason. No config is accepted unless its checksummed dataset covers the required horizon and it passes in multiple distinct regimes.
+
 ## Symbols
 
 Configure OKX demo symbols with `OKX_INST_IDS`:
