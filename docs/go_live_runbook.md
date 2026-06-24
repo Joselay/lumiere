@@ -32,20 +32,26 @@ Defaults intentionally remain conservative: demo-only OKX flag, fixed small BTC/
 Historical evidence:
 
 ```bash
+mkdir -p reports
 uv run lumiere-backtest --inst-id BTC-USDT --inst-id ETH-USDT \
-  --bar 1m --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z
+  --bar 1m --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z \
+  > reports/backtest_report.json
 uv run lumiere-optimize --inst-id BTC-USDT --bar 1m \
   --start 2026-01-01T00:00:00Z --end 2026-03-01T00:00:00Z \
   --min-trades 30 --min-walk-forward-windows 3 --min-stable-neighbors 1
 ```
 
-Promotion evidence packet without live credentials:
+Strict readiness audit before promotion:
 
 ```bash
 uv run lumiere-evidence \
+  --stage paper \
+  --backtest-report reports/backtest_report.json \
   --optimizer-report reports/strategy_optimization/optimizer_report.json \
+  --paper-ledger data/paper_trading.jsonl \
   --attribution-ledger data/attribution.jsonl \
-  --stage paper --output reports/promotion_evidence.json
+  --current-config reports/current_runtime_config.json \
+  --output reports/promotion_evidence.json
 ```
 
-Attach the generated packet to the promotion decision. Promotion is rejected if `go` is false or any `missing_evidence` item remains.
+`lumiere-evidence` emits a concise `go`/`no-go` report with severity-sorted `blockers` and exits non-zero on no-go. Promotion is rejected if `go` is false, any blocker remains, accepted candidates are stale, the observation window is too short, fill reconciliation is incomplete, alerts are active, or the current runtime config differs from the accepted candidate.

@@ -129,11 +129,55 @@ def test_optimizer_cli_smoke_writes_offline_artifacts(tmp_path, monkeypatch, cap
 
 
 def test_evidence_cli_smoke_writes_promotion_packet(tmp_path, monkeypatch, capsys) -> None:
+    now = datetime(2026, 6, 24, tzinfo=UTC)
     optimizer_report = tmp_path / "optimizer.json"
     optimizer_report.write_text(
-        json.dumps({"accepted_configs": [{"inst_id": "BTC-USDT", "strategy": "fixture"}]}),
+        json.dumps(
+            {
+                "generated_at": now.isoformat(),
+                "accepted_configs": [
+                    {
+                        "inst_id": "BTC-USDT",
+                        "strategy": "moving_average_crossover",
+                        "candidate": {"fast_window": 5, "slow_window": 20},
+                    }
+                ],
+                "reports": [
+                    {
+                        "dataset": {
+                            "start": (now - timedelta(days=60)).isoformat(),
+                            "end": now.isoformat(),
+                        },
+                        "candidates": [
+                            {
+                                "accepted": True,
+                                "rejection_reason": None,
+                                "walk_forward_gates": [{"allowed": True}],
+                                "test_report": {
+                                    "metrics": {
+                                        "net_pnl_usdt": "5",
+                                        "trade_count": 30,
+                                        "profit_factor": "1.5",
+                                        "max_drawdown_usdt": "10",
+                                        "starting_equity_usdt": "1000",
+                                        "sharpe": 0.7,
+                                    },
+                                    "baseline_comparison": {
+                                        "net_pnl_minus_no_trade_usdt": "5",
+                                        "net_pnl_minus_buy_and_hold_usdt": "2",
+                                    },
+                                    "execution_quality": {"average_slippage_bps": "5"},
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
         encoding="utf-8",
     )
+    backtest_report = tmp_path / "backtest.json"
+    backtest_report.write_text(json.dumps({"reports": [{"ok": True}]}), encoding="utf-8")
     output = tmp_path / "promotion.json"
     monkeypatch.setattr(
         sys,
@@ -144,6 +188,8 @@ def test_evidence_cli_smoke_writes_promotion_packet(tmp_path, monkeypatch, capsy
             "backtest",
             "--optimizer-report",
             str(optimizer_report),
+            "--backtest-report",
+            str(backtest_report),
             "--attribution-ledger",
             str(tmp_path / "absent-attribution.jsonl"),
             "--output",

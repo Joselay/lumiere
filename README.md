@@ -129,7 +129,7 @@ OKX_INST_IDS=BTC-USDT,ETH-USDT
 
 ## Operations
 
-Before increasing size, follow the staged [go-live profitability runbook](docs/go_live_runbook.md). It defines go/no-go thresholds, rollback rules, observation periods, and the `uv run lumiere-evidence` packet required for promotion decisions.
+Before increasing size, follow the staged [go-live profitability runbook](docs/go_live_runbook.md). It defines go/no-go thresholds, rollback rules, observation periods, and the `uv run lumiere-evidence` readiness audit required for promotion decisions. The audit exits non-zero and reports severity-sorted blockers until optimizer/backtest artifacts, paper/demo ledgers, fill reconciliation, observation duration, gate history, alert state, and current runtime config all satisfy the stage rules.
 
 ## Development
 
