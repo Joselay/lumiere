@@ -85,7 +85,7 @@ async def test_engine_tick_places_order_from_strategy_signal() -> None:
 
     assert len(client.orders) == 1
     assert client.orders[0].side is DecisionAction.BUY
-    assert "Order submitted: buy" in notifier.messages[-1]
+    assert "<b>BUY BTC-USDT</b>" in notifier.messages[-1]
 
 
 @pytest.mark.asyncio
@@ -156,7 +156,27 @@ async def test_engine_pause_resume_and_panic_controls() -> None:
     assert client.cancelled is True
     assert engine.paused is True
     assert engine.panic_stopped is True
-    assert notifier.messages[-1] == "Cannot resume after panic stop; restart the bot"
+    assert "Cannot resume" in notifier.messages[-1]
+
+
+@pytest.mark.asyncio
+async def test_engine_suppresses_repeated_cooldown_push_notifications() -> None:
+    client = FakeClient(candles(["100", "101", "110"]))
+    notifier = CollectingNotifier()
+    engine = TradingEngine(
+        client=client,
+        strategy=MovingAverageCrossoverStrategy(
+            MovingAverageCrossoverConfig(fast_window=2, slow_window=3)
+        ),
+        risk_manager=RiskManager(RiskConfig(cooldown_seconds=300)),
+        notifier=notifier,
+    )
+
+    await engine.tick()
+    await engine.tick()
+
+    assert len(client.orders) == 1
+    assert not any("cooldown active" in message for message in notifier.messages)
 
 
 @pytest.mark.asyncio
@@ -179,4 +199,4 @@ async def test_engine_pauses_after_repeated_client_failures() -> None:
     await engine.tick()
 
     assert engine.paused is True
-    assert "max consecutive failures" in notifier.messages[-1]
+    assert "Max consecutive failures" in notifier.messages[-1]

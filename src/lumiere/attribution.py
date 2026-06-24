@@ -224,7 +224,11 @@ def _alerts(
         alerts.append("abnormal_slippage")
     if rejection_counts.get("expected_edge_below_cost", 0) > 0:
         alerts.append("cost_gate_rejections")
-    if any(event.get("performance_gate_passed") is False for event in events):
+    if any(
+        event.get("performance_gate_passed") is False
+        and event.get("performance_gate_reason") != "not_evaluated"
+        for event in events
+    ):
         alerts.append("performance_gate_failure")
     return alerts
 

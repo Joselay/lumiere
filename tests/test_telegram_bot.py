@@ -13,7 +13,7 @@ class FakeBot:
 
 def test_help_text_lists_every_telegram_command() -> None:
     for command in BOT_COMMANDS:
-        assert f"/{command.command} - {command.description}" in COMMAND_HELP_TEXT
+        assert f"/{command.command} — {command.description}" in COMMAND_HELP_TEXT
 
 
 def test_set_bot_commands_registers_every_command() -> None:

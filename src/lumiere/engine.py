@@ -4,15 +4,35 @@ import asyncio
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Protocol
 
 import structlog
 
 from lumiere.attribution import AttributionLedger
-from lumiere.models import AccountSnapshot, DecisionAction, OrderRequest, OrderResult
+from lumiere.models import (
+    AccountSnapshot,
+    DecisionAction,
+    OrderRequest,
+    OrderResult,
+    StrategyDecision,
+    utc_now,
+)
 from lumiere.paper_trading import PaperTradingLedger
-from lumiere.risk import RiskManager
+from lumiere.risk import RiskDecision, RiskManager
 from lumiere.strategy import TradingStrategy
+from lumiere.telegram_ui import (
+    format_error,
+    format_lifecycle,
+    format_order_submitted,
+    format_panic,
+    format_pause,
+    format_performance,
+    format_resume,
+    format_risk,
+    format_risk_blocked,
+    format_status,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -81,6 +101,8 @@ class TradingEngine:
         self._last_risk_reason: str | None = None
         self._last_error: str | None = None
         self._last_account: AccountSnapshot | None = None
+        self._risk_notification_sent_at: dict[tuple[str, str, str], datetime] = {}
+        self._risk_notification_suppressed: dict[tuple[str, str, str], int] = {}
 
     @property
     def paused(self) -> bool:
@@ -113,50 +135,24 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001 - status should report failures to operators
                 self._last_error = str(exc)
                 return f"status=error error={exc}"
-        status = self.status()
-        return (
-            f"running={status.running} paused={status.paused} panic={status.panic_stopped} "
-            f"equity_usdt={account.equity_usdt} available_usdt={account.available_usdt} "
-            f"positions={_positions_text(account)} "
-            f"daily_pnl_usdt={account.daily_realized_pnl_usdt} "
-            f"drawdown_usdt={account.max_drawdown_usdt} "
-            f"daily_trades={account.daily_trade_count} "
-            f"gate_passed={account.performance_gate_passed} "
-            f"gate_reason={account.performance_gate_reason} "
-            f"failures={status.consecutive_failures} "
-            f"last_decision={status.last_decision} last_risk={status.last_risk_reason}"
-        )
+        return format_status(self.status(), account)
 
     async def performance_text(self) -> str:
         account = await self._account_for_report()
-        return (
-            f"daily_realized_pnl_usdt={account.daily_realized_pnl_usdt} "
-            f"max_drawdown_usdt={account.max_drawdown_usdt} "
-            f"daily_trade_count={account.daily_trade_count} "
-            f"spread_bps={account.spread_bps} "
-            f"estimated_slippage_bps={account.estimated_slippage_bps} "
-            f"estimated_total_cost_bps={account.estimated_total_cost_bps} "
-            f"realized_slippage_bps={account.realized_slippage_bps} "
-            f"rejected_by_cost_count="
-            f"{account.rejected_by_cost_count + self.risk_manager.rejected_by_cost_count} "
-            f"performance_gate_passed={account.performance_gate_passed} "
-            f"performance_gate_reason={account.performance_gate_reason} "
-            f"attribution={self._attribution_summary()}"
+        return format_performance(
+            account,
+            rejected_by_cost_count=(
+                account.rejected_by_cost_count + self.risk_manager.rejected_by_cost_count
+            ),
+            attribution_report=self._attribution_report(),
         )
 
     async def risk_text(self) -> str:
         account = await self._account_for_report()
-        config = self.risk_manager.config
-        gate_state = "passed" if account.performance_gate_passed else "blocked"
-        return (
-            f"allowed_symbols={','.join(config.allowed_inst_ids)} "
-            f"daily_pnl_usdt={account.daily_realized_pnl_usdt}/{-config.max_daily_loss_usdt} "
-            f"drawdown_usdt={account.max_drawdown_usdt}/{config.max_drawdown_usdt} "
-            f"daily_trades={account.daily_trade_count}/{config.max_daily_trades} "
-            f"spread_bps={account.spread_bps}/{config.max_spread_bps} "
-            f"performance_gate_required={config.performance_gate_required} "
-            f"performance_gate={gate_state} gate_reason={account.performance_gate_reason} "
-            f"failures={self.risk_manager.consecutive_failures}"
+        return format_risk(
+            self.risk_manager.config,
+            account,
+            failures=self.risk_manager.consecutive_failures,
         )
 
     async def _account_for_report(self) -> AccountSnapshot:
@@ -170,16 +166,16 @@ class TradingEngine:
     async def pause(self) -> None:
         self._paused = True
         log.warning("trading_paused")
-        await self.notifier.send("Trading paused")
+        await self.notifier.send(format_pause())
 
     async def resume(self) -> None:
         if self._panic_stopped:
             log.warning("trading_resume_rejected", reason="panic_stop_active")
-            await self.notifier.send("Cannot resume after panic stop; restart the bot")
+            await self.notifier.send("🚫 <b>Cannot resume</b>\nPanic stop active; restart required")
             return
         self._paused = False
         log.info("trading_resumed")
-        await self.notifier.send("Trading resumed")
+        await self.notifier.send(format_resume())
 
     async def panic(self) -> None:
         self._paused = True
@@ -187,7 +183,7 @@ class TradingEngine:
         self._stop_event.set()
         cancelled = await self.client.cancel_open_orders()
         log.critical("panic_stop", cancelled_orders=len(cancelled))
-        await self.notifier.send(f"PANIC stop active. Cancelled open orders: {len(cancelled)}")
+        await self.notifier.send(format_panic(len(cancelled)))
 
     async def stop(self) -> None:
         self._stop_event.set()
@@ -200,7 +196,7 @@ class TradingEngine:
             poll_interval_seconds=self.config.poll_interval_seconds,
             td_mode=self.config.td_mode,
         )
-        await self.notifier.send("Trading engine started")
+        await self.notifier.send(format_lifecycle("started"))
         try:
             while not self._stop_event.is_set() and not self._panic_stopped:
                 await self.tick()
@@ -212,7 +208,7 @@ class TradingEngine:
         finally:
             self._running = False
             log.info("engine_stopped")
-            await self.notifier.send("Trading engine stopped")
+            await self.notifier.send(format_lifecycle("stopped"))
 
     async def tick(self) -> None:
         if self._paused or self._panic_stopped:
@@ -258,10 +254,15 @@ class TradingEngine:
                         expected_edge_bps=decision.inputs.get("expected_edge_bps"),
                         estimated_total_cost_bps=account.estimated_total_cost_bps,
                     )
-                    await self.notifier.send(
-                        f"Risk blocked {decision.inst_id} {decision.action.value}: "
-                        f"{risk_decision.reason} ({decision.reason})"
-                    )
+                    if self._should_notify_risk_block(decision, risk_decision):
+                        await self.notifier.send(
+                            format_risk_blocked(
+                                decision.inst_id,
+                                decision.action.value,
+                                risk_decision.reason,
+                                decision.reason,
+                            )
+                        )
                     continue
                 if decision.action is DecisionAction.HOLD:
                     self.risk_manager.record_success()
@@ -287,18 +288,17 @@ class TradingEngine:
                     order_id=result.order_id,
                     reason=decision.reason,
                 )
-                await self.notifier.send(
-                    f"Order submitted: {result.side.value} {result.size_btc} {result.inst_id} "
-                    f"order_id={result.order_id} reason={decision.reason}"
-                )
+                await self.notifier.send(format_order_submitted(result, decision.reason))
         except Exception as exc:  # noqa: BLE001 - engine must convert all failures into risk state
             self.risk_manager.record_failure()
             self._last_error = str(exc)
             log.exception("engine_tick_failed", error=str(exc))
-            await self.notifier.send(f"Trading error: {exc}")
+            await self.notifier.send(format_error(exc))
             if self.risk_manager.stopped_by_failures:
                 self._paused = True
-                await self.notifier.send("Trading paused: max consecutive failures reached")
+                await self.notifier.send(
+                    "⏸️ <b>Trading paused</b>\nMax consecutive failures reached"
+                )
 
     def _account_with_paper_gate(self, account: AccountSnapshot) -> AccountSnapshot:
         if self.paper_ledger is None:
@@ -346,15 +346,31 @@ class TradingEngine:
             return
         self.attribution_ledger.record_order(order, result, ts=candles[-1].ts)
 
-    def _attribution_summary(self) -> str:
+    def _attribution_report(self) -> dict | None:
         if self.attribution_ledger is None:
-            return "disabled"
-        report = self.attribution_ledger.report()
-        metrics = report.metrics
-        return (
-            f"net_pnl_usdt={metrics['net_pnl_usdt']} fees_usdt={metrics['fees_usdt']} "
-            f"profit_factor={metrics['profit_factor']} alerts={','.join(report.alerts) or 'none'}"
-        )
+            return None
+        return self.attribution_ledger.report().to_dict()
+
+    def _should_notify_risk_block(
+        self,
+        decision: StrategyDecision,
+        risk_decision: RiskDecision,
+    ) -> bool:
+        key = (decision.inst_id, decision.action.value, risk_decision.reason)
+        if risk_decision.reason == "cooldown_active":
+            self._risk_notification_suppressed[key] = (
+                self._risk_notification_suppressed.get(key, 0) + 1
+            )
+            return False
+        now = utc_now()
+        last_sent_at = self._risk_notification_sent_at.get(key)
+        if last_sent_at is not None and now - last_sent_at < timedelta(minutes=5):
+            self._risk_notification_suppressed[key] = (
+                self._risk_notification_suppressed.get(key, 0) + 1
+            )
+            return False
+        self._risk_notification_sent_at[key] = now
+        return True
 
 
 def _normalise_strategies(
@@ -366,9 +382,3 @@ def _normalise_strategies(
     if not strategies:
         raise ValueError("at least one strategy is required")
     return strategies
-
-
-def _positions_text(account: AccountSnapshot) -> str:
-    if not account.positions:
-        return "none"
-    return ",".join(f"{position.inst_id}:{position.size_btc}" for position in account.positions)

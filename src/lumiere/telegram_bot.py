@@ -4,10 +4,12 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 from aiogram import Bot, Dispatcher, Router
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.types import BotCommand, Message
 
 from lumiere.engine import TradingEngine
+from lumiere.telegram_ui import format_command_help, format_start_message, format_strategies
 
 
 class TelegramNotifier:
@@ -37,9 +39,7 @@ BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="panic", description="Emergency stop until restart"),
 )
 
-COMMAND_HELP_TEXT = "Available commands:\n" + "\n".join(
-    f"/{command.command} - {command.description}" for command in BOT_COMMANDS
-)
+COMMAND_HELP_TEXT = format_command_help(BOT_COMMANDS)
 
 
 AccessCheck = Callable[[Message], bool]
@@ -74,7 +74,15 @@ def command_router(
     async def start(message: Message) -> None:
         await guard(
             message,
-            lambda: _text(f"Lumiere OKX demo BTC/ETH bot is online\n\n{COMMAND_HELP_TEXT}"),
+            lambda: _text(
+                format_start_message(
+                    BOT_COMMANDS,
+                    [
+                        str(params.get("inst_id", "unknown"))
+                        for params in engine.describe_strategies()
+                    ],
+                )
+            ),
         )
 
     @router.message(Command("help"))
@@ -88,10 +96,7 @@ def command_router(
     @router.message(Command("strategy"))
     async def strategy(message: Message) -> None:
         async def show() -> str:
-            sections = []
-            for params in engine.describe_strategies():
-                sections.append("\n".join(f"{key}={value}" for key, value in params.items()))
-            return "\n\n".join(sections)
+            return format_strategies(engine.describe_strategies())
 
         await guard(message, show)
 
@@ -145,7 +150,7 @@ async def run_bot(
     engine: TradingEngine,
     allowed_chat_ids: set[int],
 ) -> None:
-    bot = Bot(token=bot_token)
+    bot = Bot(token=bot_token, default=DefaultBotProperties(parse_mode="HTML"))
     await set_bot_commands(bot)
     notifier = TelegramNotifier(bot, allowed_chat_ids)
     engine.notifier = notifier
